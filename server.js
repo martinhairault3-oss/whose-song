@@ -250,11 +250,39 @@ function buildPool(room) {
       owners.get(k).ownerIds.add(p.id);
     }
   }
-  const exclusive = [];
+
+  // Grouper les morceaux exclusifs par proprietaire
+  const byOwner = new Map();
   for (const { track, ownerIds } of owners.values()) {
-    if (ownerIds.size === 1) exclusive.push({ ...track, ownerId: [...ownerIds][0] });
+    if (ownerIds.size !== 1) continue; // union disjointe : on jette l'intersection
+    const ownerId = [...ownerIds][0];
+    if (!byOwner.has(ownerId)) byOwner.set(ownerId, []);
+    byOwner.get(ownerId).push({ ...track, ownerId });
   }
-  return shuffle(exclusive);
+
+  // Melanger les morceaux de chaque joueur independamment
+  for (const songs of byOwner.values()) shuffle(songs);
+
+  // Round-robin : un morceau par joueur a tour de role pour equilibrer
+  const players = shuffle([...byOwner.keys()]);
+  const indices = new Map(players.map(p => [p, 0]));
+  const result = [];
+
+  let added = true;
+  while (added) {
+    added = false;
+    for (const pid of players) {
+      const songs = byOwner.get(pid);
+      const i = indices.get(pid);
+      if (i < songs.length) {
+        result.push(songs[i]);
+        indices.set(pid, i + 1);
+        added = true;
+      }
+    }
+  }
+
+  return result;
 }
 
 function startGame(room) {
