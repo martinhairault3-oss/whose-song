@@ -89,8 +89,12 @@ app.get(SPOTIFY_CALLBACK_PATH, async (req, res) => {
   const { code, state, error } = req.query;
 
   if (error) {
-    // L'utilisateur a refuse l'autorisation ou autre erreur
-    return res.redirect('/?spotify=denied');
+    return res.send(`<!DOCTYPE html><html><head><title>Whose Song</title></head>
+<body style="background:#14091f;color:#f3ecff;font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">
+<div style="text-align:center">
+<p style="color:#a99cc4">Connexion annulée. Ferme cet onglet.</p>
+</div>
+<script>try { window.close(); } catch(e) {}</script></body></html>`);
   }
 
   let roomCode, playerId;
@@ -134,17 +138,31 @@ app.get(SPOTIFY_CALLBACK_PATH, async (req, res) => {
         player.spotifyToken = tokenData.access_token;
         player.spotifyRefreshToken = tokenData.refresh_token || null;
         player.spotifyTokenExp = Date.now() + (tokenData.expires_in || 3600) * 1000;
-        // Le joueur est peut-etre momentanement deconnecte (redirect en cours)
-        // Le broadcast se fera quand il se reconnectera via Socket.IO
+        // Le joueur est toujours connecte (popup, pas redirect) -> broadcast
         if (player.connected) broadcast(room);
       }
     }
 
-    // Redirige vers l'app — le client detectera ?spotify=ok et se reconnectera
-    res.redirect('/?spotify=ok');
+    // Page qui notifie l'onglet principal et se ferme
+    res.send(`<!DOCTYPE html><html><head><title>Whose Song</title></head>
+<body style="background:#14091f;color:#f3ecff;font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">
+<div style="text-align:center">
+<h2 style="color:#1db954">Connecté à Spotify ✓</h2>
+<p style="color:#a99cc4">Tu peux fermer cet onglet et retourner au jeu.</p>
+</div>
+<script>
+try { window.opener && window.opener.postMessage({ type: 'spotify-connected' }, '*'); } catch(e) {}
+try { window.close(); } catch(e) {}
+</script></body></html>`);
   } catch (e) {
     console.error('Spotify OAuth error:', e.message);
-    res.redirect('/?spotify=error');
+    res.send(`<!DOCTYPE html><html><head><title>Whose Song</title></head>
+<body style="background:#14091f;color:#f3ecff;font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">
+<div style="text-align:center">
+<h2 style="color:#ff6b6b">Erreur Spotify</h2>
+<p style="color:#a99cc4">${e.message || 'Réessaie.'}</p>
+<p style="color:#a99cc4">Ferme cet onglet et retente depuis le lobby.</p>
+</div></body></html>`);
   }
 });
 
@@ -446,6 +464,8 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     const r = room(), p = me();
     if (!r || !p) return;
+    // Si un nouveau socket a pris le relais (rejoin apres OAuth), on ignore
+    if (p.socketId !== socket.id) return;
     p.connected = false;
     // si l'hote part, on transfere a un joueur connecte
     if (r.hostId === p.id) {
