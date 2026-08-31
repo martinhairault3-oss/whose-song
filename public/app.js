@@ -186,6 +186,7 @@ function renderLobby() {
   const enough = st.players.filter(p => p.connected).length >= 2;
   $('btn-start').style.display = isHost() ? 'block' : 'none';
   $('btn-start').disabled = !enough;
+  $('btn-close-lobby').style.display = isHost() ? 'block' : 'none';
   $('lobby-hint').textContent = isHost()
     ? (enough ? '' : 'Il faut au moins 2 joueurs.')
     : "En attente que l'hôte lance la partie.";
@@ -396,6 +397,7 @@ function renderReveal() {
 }
 $('btn-next').onclick = () => socket.emit('round:next');
 $('btn-stop').onclick = () => { if (confirm('Arrêter la partie ?')) socket.emit('game:stop'); };
+$('btn-close-lobby').onclick = () => { if (confirm('Fermer le salon ?')) socket.emit('game:stop'); };
 
 // ---------- classement ----------
 function renderFinished() {
@@ -432,6 +434,16 @@ socket.on('kicked', () => {
   sessionStorage.removeItem('ws_playerId');
   show('screen-home');
   toast("Tu as été retiré du salon par l'hôte.");
+});
+
+// Salon ferme par l'hote
+socket.on('room:closed', () => {
+  me.playerId = null;
+  st = null;
+  sessionStorage.removeItem('ws_room');
+  sessionStorage.removeItem('ws_playerId');
+  show('screen-home');
+  toast('Le salon a été fermé.');
 });
 
 function escapeHtml(s) { return (s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
