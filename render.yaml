@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: whose-song
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    # Import Spotify optionnel : ajoute ces variables dans le dashboard Render
+    # (Settings -> Environment) si tu veux accepter les liens Spotify.
+    #   SPOTIFY_CLIENT_ID
+    #   SPOTIFY_CLIENT_SECRET
