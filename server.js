@@ -364,6 +364,7 @@ io.on('connection', (socket) => {
     r.hostId = id;
     attach(r, player);
     cb && cb({ ok: true, code, playerId: id });
+    socket.emit('state', publicState(r));
     broadcast(r);
   });
 
@@ -384,12 +385,11 @@ io.on('connection', (socket) => {
     }
     attach(r, player);
     cb && cb({ ok: true, code, playerId: player.id });
+    socket.emit('state', publicState(r));
     broadcast(r);
   });
 
-  // Reconnexion par ID (apres redirect OAuth Spotify)
-  // Contrairement a room:join (par nom), on identifie le joueur par son ID exact
-  // pour eviter les doublons quand l'ancien socket n'a pas encore timeout.
+  // Reconnexion par ID (apres redirect OAuth Spotify ou retour d'onglet)
   socket.on('room:rejoin', ({ code, playerId }, cb) => {
     code = (code || '').toUpperCase().trim();
     const r = rooms.get(code);
@@ -400,6 +400,7 @@ io.on('connection', (socket) => {
     player.socketId = socket.id;
     attach(r, player);
     cb && cb({ ok: true, code, playerId: player.id });
+    socket.emit('state', publicState(r));
     broadcast(r);
   });
 
@@ -507,15 +508,21 @@ io.on('connection', (socket) => {
     broadcast(r);
   });
 
-  // L'hote arrete la partie en cours -> classement final
+  // L'hote arrete la partie / ferme le salon — fonctionne a tout moment
   socket.on('game:stop', () => {
     const r = room();
     if (!r || !isHost()) return;
-    if (!['playing', 'reveal', 'lobby-ready'].includes(r.phase)) return;
     clearTimeout(r.timer);
-    r.phase = 'finished';
-    r.round = null;
-    broadcast(r);
+    if (r.phase === 'lobby') {
+      // Fermer le salon : tout le monde retourne a l'accueil
+      io.to(r.code).emit('room:closed');
+      rooms.delete(r.code);
+    } else {
+      // Arreter la partie en cours -> classement final
+      r.phase = 'finished';
+      r.round = null;
+      broadcast(r);
+    }
   });
 
   // L'hote retire un joueur du salon
