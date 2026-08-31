@@ -246,6 +246,22 @@ label.field { display: block; font-size: 13px; color: var(--muted); margin-botto
 
 .hint { color: var(--muted); font-size: 13px; text-align: center; }
 
+/* ---------- kick + stop ---------- */
+.kick-btn {
+  background: transparent; border: none; color: var(--wrong);
+  font-size: 14px; padding: 0 2px 0 6px; cursor: pointer;
+  opacity: .6; transition: opacity .15s;
+}
+.kick-btn:hover { opacity: 1; }
+
+.btn-danger {
+  color: var(--wrong); border-color: var(--wrong);
+  font-size: 14px; padding: 10px 16px; margin-top: 4px;
+}
+
+.result-line.first-rank { border-color: rgba(255,194,75,.4); }
+.result-line .pts { font-family: var(--font-display); font-weight: 700; color: var(--amber); }
+
 @media (prefers-reduced-motion: reduce) {
   .disc.spinning { animation: none; }
   .screen.active { animation: none; }
