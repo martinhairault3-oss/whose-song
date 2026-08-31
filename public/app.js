@@ -10,6 +10,8 @@ let audioUnlocked = false;
 let currentRound = -1;      // pour detecter un changement de manche
 let picked = null;          // proprietaire choisi ce tour
 let voteSent = false;
+let myResult = null;        // { correct: bool } recu apres le vote
+let titleSent = false;
 let scheduleTimers = [];
 let spotifyAvailable = false; // le serveur a-t-il Spotify configure ?
 
@@ -166,31 +168,40 @@ function renderPlay() {
   // audio + decompte, seulement au changement de manche
   if (r.index !== currentRound) {
     currentRound = r.index;
-    picked = null; voteSent = false;
+    picked = null; voteSent = false; myResult = null; titleSent = false;
     setupRound(r);
   }
 
-  // grille de vote (tous sauf moi)
+  // grille de vote : TOUS les joueurs (y compris moi)
   const grid = $('guess-grid'); grid.innerHTML = '';
-  for (const p of st.players) {
-    if (p.id === me.playerId) continue;
-    const b = document.createElement('button');
-    b.className = 'guess-btn' + (picked === p.id ? ' picked' : '');
-    b.textContent = p.name;
-    b.disabled = voteSent;
-    b.onclick = () => { picked = p.id; renderPlay(); };
-    grid.appendChild(b);
+  if (!voteSent) {
+    for (const p of st.players) {
+      const b = document.createElement('button');
+      b.className = 'guess-btn' + (picked === p.id ? ' picked' : '');
+      b.textContent = p.name;
+      b.onclick = () => { picked = p.id; renderPlay(); };
+      grid.appendChild(b);
+    }
   }
 
-  $('blind-wrap').style.display = st.settings.blindTest ? 'block' : 'none';
-  $('blind-input').disabled = voteSent;
+  // Blind test : visible UNIQUEMENT apres une bonne reponse proprietaire
+  const showBlind = voteSent && myResult && myResult.correct && st.settings.blindTest && !titleSent;
+  $('blind-wrap').style.display = showBlind ? 'block' : 'none';
+  $('blind-input').disabled = titleSent;
 
+  // Bouton vote
   const alreadyVoted = st.round.voted.includes(me.playerId);
   $('btn-vote').disabled = voteSent || alreadyVoted || !picked;
-  $('btn-vote').style.display = alreadyVoted && !voteSent ? 'none' : 'block';
-  $('vote-hint').textContent = (voteSent || alreadyVoted)
-    ? 'Réponse envoyée. On attend les autres…'
-    : (picked ? '' : 'Choisis un joueur.');
+  $('btn-vote').style.display = voteSent ? 'none' : 'block';
+
+  // Hint
+  if (!voteSent && !alreadyVoted) {
+    $('vote-hint').textContent = picked ? '' : 'Choisis un joueur.';
+  } else if (showBlind) {
+    $('vote-hint').textContent = 'Bien joué ! Devine le titre pour le bonus.';
+  } else {
+    $('vote-hint').textContent = 'Réponse envoyée. On attend la fin…';
+  }
 }
 
 function setupRound(r) {
@@ -248,9 +259,24 @@ function setupRound(r) {
 $('btn-vote').onclick = () => {
   if (!picked || voteSent) return;
   voteSent = true;
-  socket.emit('round:guess', { ownerId: picked, title: $('blind-input').value.trim() });
+  socket.emit('round:guess', { ownerId: picked });
   renderPlay();
 };
+
+// Blind test : soumettre le titre (apres bonne reponse proprietaire)
+$('btn-title').onclick = () => {
+  if (titleSent) return;
+  titleSent = true;
+  socket.emit('round:guess-title', { title: $('blind-input').value.trim() });
+  $('blind-input').value = '';
+  renderPlay();
+};
+
+// Resultat prive du vote (pour savoir si on affiche le blind test)
+socket.on('round:your-result', (data) => {
+  myResult = data;
+  if (st && st.phase === 'playing') renderPlay();
+});
 
 // ---------- reveal ----------
 function renderReveal() {
