@@ -165,6 +165,15 @@ function renderLobby() {
     el.innerHTML = `<span class="dot"></span>${escapeHtml(p.name)}` +
       extra +
       ` <span class="count">${p.trackCount}🎵</span>`;
+    // Kick button (hote uniquement, pas sur soi-meme)
+    if (isHost() && p.id !== me.playerId) {
+      const kick = document.createElement('button');
+      kick.className = 'kick-btn';
+      kick.textContent = '✕';
+      kick.title = 'Retirer ce joueur';
+      kick.onclick = (e) => { e.stopPropagation(); socket.emit('player:kick', { playerId: p.id }); };
+      el.appendChild(kick);
+    }
     box.appendChild(el);
   }
   const mine = myPlayer();
@@ -342,17 +351,21 @@ function renderReveal() {
   $('reveal-song').textContent = `${r.artist} — ${r.title}`;
 
   const box = $('reveal-results'); box.innerHTML = '';
-  // votants
+  // votants (sauf le proprio)
   for (const v of r.votes) {
+    if (v.voter === r.ownerId) continue;
     const line = document.createElement('div');
     line.className = 'result-line';
-    const bonus = v.correctTitle ? ' <span class="verdict ok">+ titre</span>' : '';
-    const verdict = v.correctOwner
-      ? '<span class="verdict ok">trouvé ✓</span>'
-      : `<span class="verdict no">a dit ${escapeHtml(playerName(v.guessOwner))}</span>`;
+    let detail = '';
+    if (v.correctOwner) {
+      detail = `<span class="verdict ok">trouvé en ${v.elapsedSec}s → +${v.speedPts}</span>`;
+      if (v.correctTitle) detail += ' <span class="verdict ok">+ titre +50</span>';
+    } else {
+      detail = `<span class="verdict no">a dit ${escapeHtml(playerName(v.guessOwner))}</span>`;
+    }
     const d = r.deltas[v.voter] || 0;
     line.innerHTML = `<span>${escapeHtml(playerName(v.voter))}</span>` +
-      `<span>${verdict}${bonus} <span class="delta">${d > 0 ? '+' + d : ''}</span></span>`;
+      `<span>${detail} <span class="delta">${d > 0 ? '+' + d : ''}</span></span>`;
     box.appendChild(line);
   }
   // points "piege" du proprietaire
@@ -364,10 +377,25 @@ function renderReveal() {
     box.appendChild(line);
   }
 
+  // Mini classement
+  const title = document.createElement('h2');
+  title.textContent = 'Scores';
+  title.style.marginTop = '14px';
+  box.appendChild(title);
+  const sorted = [...st.players].sort((a, b) => b.score - a.score);
+  sorted.forEach((p, i) => {
+    const row = document.createElement('div');
+    row.className = 'result-line' + (i === 0 ? ' first-rank' : '');
+    row.innerHTML = `<span>${i + 1}. ${escapeHtml(p.name)}</span><span class="pts">${p.score} pts</span>`;
+    box.appendChild(row);
+  });
+
   $('btn-next').style.display = isHost() ? 'block' : 'none';
+  $('btn-stop').style.display = isHost() ? 'block' : 'none';
   $('reveal-hint').textContent = isHost() ? '' : "En attente de l'hôte…";
 }
 $('btn-next').onclick = () => socket.emit('round:next');
+$('btn-stop').onclick = () => { if (confirm('Arrêter la partie ?')) socket.emit('game:stop'); };
 
 // ---------- classement ----------
 function renderFinished() {
@@ -395,5 +423,15 @@ socket.on('state', (state) => {
   }
 });
 socket.on('error:msg', (m) => toast(m));
+
+// Kicked par l'hote
+socket.on('kicked', () => {
+  me.playerId = null;
+  st = null;
+  sessionStorage.removeItem('ws_room');
+  sessionStorage.removeItem('ws_playerId');
+  show('screen-home');
+  toast("Tu as été retiré du salon par l'hôte.");
+});
 
 function escapeHtml(s) { return (s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
