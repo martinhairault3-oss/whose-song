@@ -352,9 +352,8 @@ function renderReveal() {
   $('reveal-song').textContent = `${r.artist} — ${r.title}`;
 
   const box = $('reveal-results'); box.innerHTML = '';
-  // votants (sauf le proprio)
+  // votants (tout le monde)
   for (const v of r.votes) {
-    if (v.voter === r.ownerId) continue;
     const line = document.createElement('div');
     line.className = 'result-line';
     let detail = '';
