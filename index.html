@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Whose Song — devine la playlist</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+
+    <!-- ACCUEIL -->
+    <section id="screen-home" class="screen active">
+      <div class="home-hero">
+        <h1 class="brand">Whose <em>Song</em></h1>
+        <p class="tagline">Chacun balance ses playlists. Une chanson passe — devinez de qui elle vient. Le meilleur oreille (et le meilleur goût caché) gagne.</p>
+      </div>
+      <div class="card stack">
+        <div>
+          <label class="field" for="home-name">Ton pseudo</label>
+          <input id="home-name" type="text" maxlength="20" placeholder="Alex" autocomplete="off" />
+        </div>
+        <button id="btn-create" class="btn-primary">Créer un salon</button>
+        <div class="divider">ou rejoindre</div>
+        <div class="row">
+          <input id="home-code" class="grow" type="text" maxlength="4" placeholder="Code (ex : K7QF)" autocomplete="off" style="text-transform:uppercase" />
+          <button id="btn-join" class="btn-ghost" style="flex:0 0 auto">Rejoindre</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- LOBBY -->
+    <section id="screen-lobby" class="screen">
+      <div class="row" style="align-items:center">
+        <div class="code-pill grow" id="lobby-code" title="Partage ce code">— <button id="btn-copy" class="btn-ghost" style="font-size:12px;padding:6px 10px;flex:0">copier</button></div>
+      </div>
+
+      <div class="card stack">
+        <h2>Joueurs</h2>
+        <div class="players" id="lobby-players"></div>
+      </div>
+
+      <div class="card stack">
+        <h2>Tes playlists</h2>
+        <p class="small">Colle un lien de playlist <b>Deezer</b> ou <b>Spotify</b>. Tu peux en ajouter plusieurs.</p>
+
+        <!-- Spotify connect -->
+        <div id="spotify-wrap" style="display:none">
+          <button id="btn-spotify" class="btn-spotify">Se connecter à Spotify</button>
+          <p class="small" style="margin-top:6px">Nécessaire pour importer une playlist Spotify.</p>
+        </div>
+
+        <div class="row">
+          <input id="pl-url" class="grow" type="text" placeholder="https://deezer.com/playlist/… ou Spotify" autocomplete="off" />
+          <button id="btn-add-pl" class="btn-ghost" style="flex:0 0 auto">Ajouter</button>
+        </div>
+        <p class="small" id="pl-status">Aucun morceau importé.</p>
+      </div>
+
+      <div class="card stack" id="host-settings" style="display:none">
+        <h2>Réglages</h2>
+        <div class="row" style="align-items:center">
+          <label class="field grow" for="set-rounds" style="margin:0">Nombre de manches</label>
+          <input id="set-rounds" type="number" min="1" max="50" value="10" style="flex:0 0 90px" />
+        </div>
+        <div class="toggle">
+          <input id="set-blind" type="checkbox" checked />
+          <label for="set-blind">Blind test : bonus si tu trouves aussi le titre</label>
+        </div>
+      </div>
+
+      <div class="grow"></div>
+      <button id="btn-start" class="btn-primary" style="display:none">Lancer la partie</button>
+      <p class="hint" id="lobby-hint"></p>
+    </section>
+
+    <!-- DEBLOCAGE AUDIO (le seul tap obligatoire) -->
+    <section id="screen-unlock" class="screen">
+      <div class="grow"></div>
+      <div class="stage">
+        <div class="disc"></div>
+      </div>
+      <h2 style="text-align:center">Prêt à jouer&nbsp;?</h2>
+      <p class="hint">Un seul appui pour activer le son sur ton téléphone. Ensuite tout s'enchaîne tout seul.</p>
+      <button id="btn-ready" class="btn-primary">Je suis prêt</button>
+      <p class="hint" id="ready-count"></p>
+      <div class="grow"></div>
+    </section>
+
+    <!-- JEU -->
+    <section id="screen-play" class="screen">
+      <div class="row" style="justify-content:space-between;align-items:center">
+        <span class="timer-ring" id="round-label">Manche</span>
+        <span class="timer-ring">⏱ <b id="round-timer">30</b></span>
+      </div>
+      <div class="stage">
+        <div class="disc spinning" id="play-disc"></div>
+        <div class="countdown" id="play-countdown" style="display:none">3</div>
+      </div>
+      <h2 style="text-align:center">De qui vient ce morceau&nbsp;?</h2>
+      <div class="guess-grid" id="guess-grid"></div>
+      <div id="blind-wrap" style="display:none">
+        <label class="field" for="blind-input">Blind test — le titre&nbsp;? (bonus)</label>
+        <input id="blind-input" type="text" placeholder="Titre de la chanson…" autocomplete="off" />
+      </div>
+      <button id="btn-vote" class="btn-primary" disabled>Valider ma réponse</button>
+      <p class="hint" id="vote-hint"></p>
+    </section>
+
+    <!-- REVEAL -->
+    <section id="screen-reveal" class="screen">
+      <div class="stage">
+        <div class="disc revealed" id="reveal-disc"><img class="cover" id="reveal-cover" alt="" /></div>
+      </div>
+      <div class="owner-tag">
+        <div class="who" id="reveal-owner">—</div>
+        <div class="song" id="reveal-song">—</div>
+      </div>
+      <div class="stack" id="reveal-results"></div>
+      <div class="grow"></div>
+      <button id="btn-next" class="btn-primary" style="display:none">Manche suivante</button>
+      <p class="hint" id="reveal-hint"></p>
+    </section>
+
+    <!-- CLASSEMENT -->
+    <section id="screen-finished" class="screen">
+      <h1 class="brand">Terminé <em>🏆</em></h1>
+      <div class="rank" id="final-rank"></div>
+      <div class="grow"></div>
+      <button id="btn-restart" class="btn-primary" style="display:none">Rejouer</button>
+      <p class="hint" id="finished-hint">L'hôte peut relancer une partie.</p>
+    </section>
+
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
