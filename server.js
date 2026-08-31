@@ -203,10 +203,9 @@ function publicState(room) {
       ownerId: s.ownerId, ownerName: owner ? owner.name : '?',
       title: s.title, artist: s.artist, cover: s.cover, preview: s.preview,
       votes: [...r.votes.entries()].map(([voter, v]) => {
-        const isOwnerVote = voter === s.ownerId;
         // Calcul du score de rapidite (pour affichage)
         let speedPts = 0, elapsedSec = 0;
-        if (!isOwnerVote && v.ownerId === s.ownerId) {
+        if (v.ownerId === s.ownerId) {
           const elapsed = Math.max(0, v.timestamp - r.startAt);
           const ratio = Math.min(1, elapsed / room.settings.clipMs);
           speedPts = Math.max(10, Math.round(100 - 90 * ratio));
@@ -310,16 +309,17 @@ function reveal(room) {
 
   let fooled = 0;
   for (const [voterId, v] of r.votes.entries()) {
-    if (voterId === s.ownerId) continue;               // le proprio ne marque pas
     if (v.ownerId === s.ownerId) {
-      // Score degressif : 100 pts instantane -> 10 pts a la fin du clip
+      // Bonne reponse : score degressif (tout le monde, proprio inclus)
       const elapsed = Math.max(0, v.timestamp - r.startAt);
       const ratio = Math.min(1, elapsed / room.settings.clipMs);
       const pts = Math.max(10, Math.round(100 - 90 * ratio));
       add(voterId, pts);
-    } else {
+    } else if (voterId !== s.ownerId) {
+      // Mauvaise reponse d'un non-proprio = piege
       fooled++;
     }
+    // Le proprio qui se trompe ne compte pas comme piege (on ne se piege pas soi-meme)
     if (v.titleCorrect) add(voterId, 50);              // bonus blind test (fixe)
   }
   if (fooled > 0) add(s.ownerId, fooled * 20);          // points "piege"
