@@ -18,18 +18,20 @@ let spotifyAvailable = false; // le serveur a-t-il Spotify configure ?
 // ---------- auto-reconnexion ----------
 // Quand on quitte le navigateur (ex: aller copier un lien Spotify) et qu'on
 // revient, le socket se reconnecte. On rejoint automatiquement le salon.
+let rejoinPending = false;
+
 function tryAutoRejoin() {
   const savedRoom = sessionStorage.getItem('ws_room');
   const savedPlayerId = sessionStorage.getItem('ws_playerId');
   if (!savedRoom || !savedPlayerId) return;
   if (!socket.connected) return;
-  // Deja dans un salon ? (rejoin inutile)
-  if (me.playerId && st) return;
+  if (rejoinPending) return;
+  rejoinPending = true;
 
   socket.emit('room:rejoin', { code: savedRoom, playerId: savedPlayerId }, (res) => {
+    rejoinPending = false;
     if (res && res.ok) {
       me.playerId = res.playerId;
-      toast('Reconnecté au salon ✓');
     } else {
       // Salon expire ou joueur introuvable
       sessionStorage.removeItem('ws_room');
@@ -41,11 +43,21 @@ function tryAutoRejoin() {
 // Socket (re)connecte -> rejoin
 socket.on('connect', tryAutoRejoin);
 
+// Reset le flag si on perd la connexion
+socket.on('disconnect', () => {
+  rejoinPending = false;
+  toast('Connexion perdue, reconnexion…');
+});
+
 // Tab redevient visible (retour depuis une autre app sur mobile)
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
-    // Petit delai pour laisser le socket se reconnecter si besoin
-    setTimeout(tryAutoRejoin, 300);
+    // Force la reconnexion si le socket est mort
+    if (socket.disconnected) socket.connect();
+    // Plusieurs tentatives pour laisser le temps au socket de se reconnecter
+    tryAutoRejoin();
+    setTimeout(tryAutoRejoin, 500);
+    setTimeout(tryAutoRejoin, 2000);
   }
 });
 
@@ -383,6 +395,5 @@ socket.on('state', (state) => {
   }
 });
 socket.on('error:msg', (m) => toast(m));
-socket.on('disconnect', () => toast('Connexion perdue, reconnexion…'));
 
 function escapeHtml(s) { return (s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
