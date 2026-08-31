@@ -291,17 +291,25 @@ function reveal(room) {
   room.round.revealed = true;
 
   const s = room.round.song;
+  const r = room.round;
   const deltas = {};
   const add = (id, n) => { deltas[id] = (deltas[id] || 0) + n; };
 
   let fooled = 0;
-  for (const [voterId, v] of room.round.votes.entries()) {
-    if (voterId === s.ownerId) continue;
-    if (v.ownerId === s.ownerId) add(voterId, 100);   // bon proprietaire
-    else fooled++;                                     // pieger par le proprietaire
-    if (v.titleCorrect) add(voterId, 50);             // bonus blind test
+  for (const [voterId, v] of r.votes.entries()) {
+    if (voterId === s.ownerId) continue;               // le proprio ne marque pas
+    if (v.ownerId === s.ownerId) {
+      // Score degressif : 100 pts instantane -> 10 pts a la fin du clip
+      const elapsed = Math.max(0, v.timestamp - r.startAt);
+      const ratio = Math.min(1, elapsed / room.settings.clipMs);
+      const pts = Math.max(10, Math.round(100 - 90 * ratio));
+      add(voterId, pts);
+    } else {
+      fooled++;
+    }
+    if (v.titleCorrect) add(voterId, 50);              // bonus blind test (fixe)
   }
-  if (fooled > 0) add(s.ownerId, fooled * 20);        // points "piege"
+  if (fooled > 0) add(s.ownerId, fooled * 20);          // points "piege"
 
   for (const [id, n] of Object.entries(deltas)) {
     const p = room.players.get(id); if (p) p.score += n;
@@ -429,11 +437,36 @@ io.on('connection', (socket) => {
     if (r.phase === 'lobby-ready') maybeStartFirstRound(r);
   });
 
-  socket.on('round:guess', ({ ownerId, title }) => {
+  socket.on('round:guess', ({ ownerId }) => {
     const r = room(), p = me();
     if (!r || !p || r.phase !== 'playing' || !r.round) return;
-    if (p.id === r.round.song.ownerId) return;           // le proprietaire ne devine pas
     if (r.round.votes.has(p.id)) return;                 // un seul vote
+
+    const s = r.round.song;
+    const correct = ownerId === s.ownerId;
+
+    r.round.votes.set(p.id, {
+      ownerId,
+      timestamp: Date.now(),
+      title: null,
+      titleCorrect: false,
+    });
+
+    // Resultat prive : le joueur sait s'il a bon (pour afficher le blind test)
+    socket.emit('round:your-result', { correct });
+    broadcast(r);
+    // Pas d'auto-reveal : le timer tourne toujours jusqu'au bout
+  });
+
+  // Blind test : le joueur soumet le titre APRES avoir trouve le bon proprietaire
+  socket.on('round:guess-title', ({ title }) => {
+    const r = room(), p = me();
+    if (!r || !p || r.phase !== 'playing' || !r.round) return;
+
+    const vote = r.round.votes.get(p.id);
+    if (!vote) return;                                   // pas encore vote
+    if (vote.ownerId !== r.round.song.ownerId) return;   // mauvaise reponse -> pas de blind test
+    if (vote.title !== null) return;                      // deja soumis
 
     let titleCorrect = false;
     if (r.settings.blindTest && title) {
@@ -441,9 +474,9 @@ io.on('connection', (socket) => {
       titleCorrect = !!g && (real.includes(g) || g.includes(real) ||
         real.split(' ').filter(w => w.length > 2 && g.includes(w)).length >= Math.min(2, real.split(' ').length));
     }
-    r.round.votes.set(p.id, { ownerId, title: title || null, titleCorrect });
+    vote.title = title || null;
+    vote.titleCorrect = titleCorrect;
     broadcast(r);
-    if (everyoneVoted(r)) reveal(r);
   });
 
   socket.on('round:next', () => {
@@ -477,6 +510,5 @@ io.on('connection', (socket) => {
       setTimeout(() => { const rr = rooms.get(r.code); if (rr && ![...rr.players.values()].some(x => x.connected)) rooms.delete(r.code); }, 5 * 60 * 1000);
     }
     broadcast(r);
-    if (r.phase === 'playing' && r.round && everyoneVoted(r)) reveal(r);
   });
 });
