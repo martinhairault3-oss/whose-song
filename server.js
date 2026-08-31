@@ -202,12 +202,25 @@ function publicState(room) {
       index: room.roundIndex, total: room.songs.length,
       ownerId: s.ownerId, ownerName: owner ? owner.name : '?',
       title: s.title, artist: s.artist, cover: s.cover, preview: s.preview,
-      votes: [...r.votes.entries()].map(([voter, v]) => ({
-        voter, guessOwner: v.ownerId,
-        correctOwner: v.ownerId === s.ownerId,
-        titleGuess: v.title || null,
-        correctTitle: v.titleCorrect || false,
-      })),
+      votes: [...r.votes.entries()].map(([voter, v]) => {
+        const isOwnerVote = voter === s.ownerId;
+        // Calcul du score de rapidite (pour affichage)
+        let speedPts = 0, elapsedSec = 0;
+        if (!isOwnerVote && v.ownerId === s.ownerId) {
+          const elapsed = Math.max(0, v.timestamp - r.startAt);
+          const ratio = Math.min(1, elapsed / room.settings.clipMs);
+          speedPts = Math.max(10, Math.round(100 - 90 * ratio));
+          elapsedSec = Math.round(elapsed / 100) / 10; // 1 decimale
+        }
+        return {
+          voter, guessOwner: v.ownerId,
+          correctOwner: v.ownerId === s.ownerId,
+          titleGuess: v.title || null,
+          correctTitle: v.titleCorrect || false,
+          speedPts,
+          elapsedSec,
+        };
+      }),
       deltas: r.deltas || {},
     };
   }
@@ -491,6 +504,34 @@ io.on('connection', (socket) => {
     r.phase = 'lobby'; r.songs = []; r.round = null; r.roundIndex = -1;
     for (const p of r.players.values()) { p.score = 0; p.ready = false; }
     clearTimeout(r.timer);
+    broadcast(r);
+  });
+
+  // L'hote arrete la partie en cours -> classement final
+  socket.on('game:stop', () => {
+    const r = room();
+    if (!r || !isHost()) return;
+    if (!['playing', 'reveal', 'lobby-ready'].includes(r.phase)) return;
+    clearTimeout(r.timer);
+    r.phase = 'finished';
+    r.round = null;
+    broadcast(r);
+  });
+
+  // L'hote retire un joueur du salon
+  socket.on('player:kick', ({ playerId }) => {
+    const r = room();
+    if (!r || !isHost()) return;
+    if (playerId === r.hostId) return;                   // on ne se kick pas soi-meme
+    const target = r.players.get(playerId);
+    if (!target) return;
+    // Prevenir et deconnecter le joueur kick
+    const targetSocket = io.sockets.sockets.get(target.socketId);
+    if (targetSocket) {
+      targetSocket.emit('kicked');
+      targetSocket.leave(r.code);
+    }
+    r.players.delete(playerId);
     broadcast(r);
   });
 
