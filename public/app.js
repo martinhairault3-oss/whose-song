@@ -46,7 +46,11 @@ $('btn-create').onclick = () => {
   const name = $('home-name').value.trim();
   if (!name) return toast('Choisis un pseudo.');
   socket.emit('room:create', { name }, (res) => {
-    if (res && res.ok) me.playerId = res.playerId;
+    if (res && res.ok) {
+      me.playerId = res.playerId;
+      sessionStorage.setItem('ws_room', res.code);
+      sessionStorage.setItem('ws_playerId', res.playerId);
+    }
   });
 };
 $('btn-join').onclick = () => {
@@ -55,7 +59,11 @@ $('btn-join').onclick = () => {
   if (!name) return toast('Choisis un pseudo.');
   if (code.length !== 4) return toast('Le code fait 4 lettres.');
   socket.emit('room:join', { code, name }, (res) => {
-    if (res && res.ok) me.playerId = res.playerId;
+    if (res && res.ok) {
+      me.playerId = res.playerId;
+      sessionStorage.setItem('ws_room', res.code);
+      sessionStorage.setItem('ws_playerId', res.playerId);
+    }
     else toast(res && res.error || 'Impossible de rejoindre.');
   });
 };
@@ -342,5 +350,24 @@ socket.on('state', (state) => {
 });
 socket.on('error:msg', (m) => toast(m));
 socket.on('disconnect', () => toast('Connexion perdue, reconnexion…'));
+
+// ---------- auto-reconnexion ----------
+// Quand le socket se (re)connecte, on rejoint automatiquement le salon
+// si on en avait un (ex: retour apres avoir copie un lien Spotify).
+socket.on('connect', () => {
+  const savedRoom = sessionStorage.getItem('ws_room');
+  const savedPlayerId = sessionStorage.getItem('ws_playerId');
+  if (savedRoom && savedPlayerId) {
+    socket.emit('room:rejoin', { code: savedRoom, playerId: savedPlayerId }, (res) => {
+      if (res && res.ok) {
+        me.playerId = res.playerId;
+      } else {
+        // Salon expire ou joueur introuvable -> on nettoie
+        sessionStorage.removeItem('ws_room');
+        sessionStorage.removeItem('ws_playerId');
+      }
+    });
+  }
+});
 
 function escapeHtml(s) { return (s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
