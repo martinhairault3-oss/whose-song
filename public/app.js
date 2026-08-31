@@ -32,47 +32,12 @@ fetch('/auth/spotify/check').then(r => r.json()).then(d => {
   spotifyAvailable = d.available;
 }).catch(() => {});
 
-// ---------- Spotify OAuth : retour apres redirect ----------
-(function handleSpotifyReturn() {
-  const params = new URLSearchParams(location.search);
-  const spotifyResult = params.get('spotify');
-  if (!spotifyResult) return;
-
-  // Nettoie l'URL
-  history.replaceState(null, '', '/');
-
-  // Reconnexion par playerId (pas par nom) pour eviter les doublons
-  const savedRoom = sessionStorage.getItem('ws_room');
-  const savedPlayerId = sessionStorage.getItem('ws_playerId');
-
-  function rejoin(successMsg, failMsg) {
-    if (savedRoom && savedPlayerId) {
-      socket.emit('room:rejoin', { code: savedRoom, playerId: savedPlayerId }, (res) => {
-        if (res && res.ok) {
-          me.playerId = res.playerId;
-          toast(successMsg);
-        } else {
-          toast(failMsg || 'Impossible de rejoindre le salon.');
-        }
-      });
-    }
+// ---------- Spotify OAuth : retour via popup (postMessage) ----------
+window.addEventListener('message', (e) => {
+  if (e.data && e.data.type === 'spotify-connected') {
+    toast('Connecté à Spotify ✓');
   }
-
-  if (spotifyResult === 'ok') {
-    rejoin('Connecté à Spotify ✓', 'Spotify connecté, mais le salon a expiré.');
-  } else if (spotifyResult === 'denied') {
-    rejoin('Connexion Spotify annulée.', 'Salon introuvable.');
-    toast('Connexion Spotify annulée.');
-  } else if (spotifyResult === 'error') {
-    rejoin('Erreur Spotify — reconnecté au salon.', 'Salon introuvable.');
-    toast('Erreur de connexion Spotify. Réessaie.');
-  }
-
-  // Nettoyage sessionStorage
-  sessionStorage.removeItem('ws_room');
-  sessionStorage.removeItem('ws_name');
-  sessionStorage.removeItem('ws_playerId');
-})();
+});
 
 // ---------- accueil ----------
 $('btn-create').onclick = () => {
@@ -125,12 +90,11 @@ $('btn-spotify').onclick = () => {
   if (!st || !me.playerId) return;
   const mine = myPlayer();
   if (!mine) return;
-  // Sauvegarde les infos pour se reconnecter apres le redirect OAuth
-  sessionStorage.setItem('ws_room', st.code);
-  sessionStorage.setItem('ws_name', mine.name);
-  sessionStorage.setItem('ws_playerId', me.playerId);
-  // Redirect vers l'auth Spotify
-  window.location.href = `/auth/spotify?roomCode=${encodeURIComponent(st.code)}&playerId=${encodeURIComponent(me.playerId)}`;
+  // Popup au lieu de redirect : le socket reste connecte
+  const url = `/auth/spotify?roomCode=${encodeURIComponent(st.code)}&playerId=${encodeURIComponent(me.playerId)}`;
+  const w = 500, h = 700;
+  const left = (screen.width - w) / 2, top = (screen.height - h) / 2;
+  window.open(url, 'spotify-auth', `width=${w},height=${h},left=${left},top=${top}`);
 };
 
 function renderLobby() {
