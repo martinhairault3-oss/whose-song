@@ -15,6 +15,40 @@ let titleSent = false;
 let scheduleTimers = [];
 let spotifyAvailable = false; // le serveur a-t-il Spotify configure ?
 
+// ---------- auto-reconnexion ----------
+// Quand on quitte le navigateur (ex: aller copier un lien Spotify) et qu'on
+// revient, le socket se reconnecte. On rejoint automatiquement le salon.
+function tryAutoRejoin() {
+  const savedRoom = sessionStorage.getItem('ws_room');
+  const savedPlayerId = sessionStorage.getItem('ws_playerId');
+  if (!savedRoom || !savedPlayerId) return;
+  if (!socket.connected) return;
+  // Deja dans un salon ? (rejoin inutile)
+  if (me.playerId && st) return;
+
+  socket.emit('room:rejoin', { code: savedRoom, playerId: savedPlayerId }, (res) => {
+    if (res && res.ok) {
+      me.playerId = res.playerId;
+      toast('Reconnecté au salon ✓');
+    } else {
+      // Salon expire ou joueur introuvable
+      sessionStorage.removeItem('ws_room');
+      sessionStorage.removeItem('ws_playerId');
+    }
+  });
+}
+
+// Socket (re)connecte -> rejoin
+socket.on('connect', tryAutoRejoin);
+
+// Tab redevient visible (retour depuis une autre app sur mobile)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    // Petit delai pour laisser le socket se reconnecter si besoin
+    setTimeout(tryAutoRejoin, 300);
+  }
+});
+
 // ---------- utilitaires UI ----------
 function show(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
@@ -350,24 +384,5 @@ socket.on('state', (state) => {
 });
 socket.on('error:msg', (m) => toast(m));
 socket.on('disconnect', () => toast('Connexion perdue, reconnexion…'));
-
-// ---------- auto-reconnexion ----------
-// Quand le socket se (re)connecte, on rejoint automatiquement le salon
-// si on en avait un (ex: retour apres avoir copie un lien Spotify).
-socket.on('connect', () => {
-  const savedRoom = sessionStorage.getItem('ws_room');
-  const savedPlayerId = sessionStorage.getItem('ws_playerId');
-  if (savedRoom && savedPlayerId) {
-    socket.emit('room:rejoin', { code: savedRoom, playerId: savedPlayerId }, (res) => {
-      if (res && res.ok) {
-        me.playerId = res.playerId;
-      } else {
-        // Salon expire ou joueur introuvable -> on nettoie
-        sessionStorage.removeItem('ws_room');
-        sessionStorage.removeItem('ws_playerId');
-      }
-    });
-  }
-});
 
 function escapeHtml(s) { return (s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
