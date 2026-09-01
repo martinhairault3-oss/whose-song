@@ -198,16 +198,17 @@ function buildQuizPlusPool(room) {
   const connected = [...room.players.values()].filter(p => p.connected);
   const questions = [];
   for (const [, data] of artistData) {
-    if (data.players.size < 2) continue;
+    // Remplir 0 pour les joueurs qui n'ont pas cet artiste
     for (const p of connected) { if (!data.players.has(p.id)) data.players.set(p.id, 0); }
     const entries = [...data.players.entries()].sort((a, b) => b[1] - a[1]);
     const maxC = entries[0][1], minC = entries[entries.length - 1][1];
-    if (maxC === minC) continue;
+    if (maxC === minC || maxC === 0) continue; // tous pareil ou personne -> pas interessant
     const maxIds = entries.filter(([, c]) => c === maxC).map(([id]) => id);
     const minIds = entries.filter(([, c]) => c === minC).map(([id]) => id);
     questions.push({ type: 'quizplus', artist: data.display, direction: 'plus', counts: Object.fromEntries(data.players), answerIds: maxIds, answerCount: maxC });
     questions.push({ type: 'quizplus', artist: data.display, direction: 'moins', counts: Object.fromEntries(data.players), answerIds: minIds, answerCount: minC });
   }
+  console.log(`QuizPlus: ${artistData.size} artistes analyses, ${questions.length} questions generees`);
   return shuffle(questions);
 }
 
@@ -215,8 +216,9 @@ function buildGamePool(room) {
   const mode = room.settings.mode || 'roulette';
   if (mode === 'roulette') return buildRoulettePool(room);
   if (mode === 'quizplus') return buildQuizPlusPool(room);
-  // mixed : interleave
+  // mixed : interleave roulette et quiz
   const r = buildRoulettePool(room), q = buildQuizPlusPool(room), mix = [];
+  console.log(`Mixed pool: ${r.length} roulette, ${q.length} quiz`);
   let ri = 0, qi = 0;
   while (ri < r.length || qi < q.length) { if (ri < r.length) mix.push(r[ri++]); if (qi < q.length) mix.push(q[qi++]); }
   return shuffle(mix);
@@ -248,7 +250,8 @@ function nextRound(room) {
   if (room.roundIndex >= room.songs.length) return endGame(room);
   const desc = room.songs[room.roundIndex];
   const startAt = Date.now() + 3000;
-  const deadline = startAt + room.settings.clipMs;
+  const duration = desc.type === 'quizplus' ? 10000 : room.settings.clipMs;
+  const deadline = startAt + duration;
   if (desc.type === 'roulette') {
     room.round = { type: 'roulette', song: desc.song, startAt, deadline, votes: new Map(), revealed: false, deltas: null };
   } else {
