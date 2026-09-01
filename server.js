@@ -290,8 +290,6 @@ function buildPool(room) {
 
   // Melange total : equilibre garanti, ordre imprevisible
   return shuffle(balanced);
-
-  return result;
 }
 
 function startGame(room) {
