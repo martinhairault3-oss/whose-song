@@ -181,10 +181,14 @@ function setupRound(r) {
   clearTimers(); show('screen-play');
   const disc = $('play-disc'), cd = $('play-countdown');
   if (r.type === 'roulette') {
-    disc.classList.add('spinning'); try { audio.pause(); audio.src = ''; } catch {}
-    audio = new Audio(); audio.preload = 'auto'; audio.src = r.preview; let retries = 0;
-    audio.onerror = () => { if (retries < 3) { retries++; audio.src = r.preview; audio.load(); } }; audio.load();
-  } else { disc.classList.remove('spinning'); try { audio.pause(); audio.src = ''; } catch {} }
+    disc.classList.add('spinning');
+    // Reset propre de l'element audio (sans en creer un nouveau — garde le deblocage)
+    try { audio.pause(); } catch {}
+    audio.removeAttribute('src');
+    audio.load(); // force le reset interne du navigateur
+    audio.src = r.preview;
+    audio.load();
+  } else { disc.classList.remove('spinning'); try { audio.pause(); audio.removeAttribute('src'); } catch {} }
   const delay = r.startAt - Date.now(), clipSec = (r.deadline - r.startAt) / 1000;
   if (delay > 0) {
     cd.style.display = 'block'; cd.textContent = Math.ceil(delay / 1000);
@@ -195,8 +199,28 @@ function setupRound(r) {
   const chrono = () => { const left = Math.max(0, Math.ceil((r.deadline - Date.now()) / 1000)); $('round-timer').textContent = left; if (left > 0) scheduleTimers.push(setTimeout(chrono, 300)); }; chrono();
 }
 function startClip(r, clipSec) {
+  if (!audioUnlocked) return;
   const elapsed = Math.max(0, (Date.now() - r.startAt) / 1000);
-  if (audioUnlocked && elapsed < clipSec) { try { audio.currentTime = Math.min(elapsed, clipSec - 0.5); } catch {} audio.play().catch(() => { setTimeout(() => audio.play().catch(() => {}), 300); }); }
+  if (elapsed >= clipSec) return;
+  try { audio.currentTime = Math.min(elapsed, clipSec - 0.5); } catch {}
+
+  const tryPlay = (attempt) => {
+    audio.play().then(() => {
+      // Watchdog : verifie que ca joue vraiment 1s apres
+      scheduleTimers.push(setTimeout(() => {
+        if (audio.paused && Date.now() < r.deadline) {
+          audio.load();
+          setTimeout(() => audio.play().catch(() => {}), 200);
+        }
+      }, 1000));
+    }).catch(() => {
+      if (attempt < 3) {
+        setTimeout(() => { audio.load(); setTimeout(() => tryPlay(attempt + 1), 200); }, 300);
+      }
+    });
+  };
+  tryPlay(0);
+
   scheduleTimers.push(setTimeout(() => { try { audio.pause(); } catch {} }, Math.max(0, r.deadline - Date.now())));
 }
 
