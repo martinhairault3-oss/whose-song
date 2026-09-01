@@ -68,12 +68,20 @@
       <div class="card stack" id="host-settings" style="display:none">
         <h2>Réglages</h2>
         <div class="row" style="align-items:center">
+          <label class="field grow" for="set-mode" style="margin:0">Mode de jeu</label>
+          <select id="set-mode" style="flex:0 0 160px">
+            <option value="roulette">🎵 Roulette</option>
+            <option value="quizplus">📊 Qui a le +/- ?</option>
+            <option value="mixed">🎲 Mixte</option>
+          </select>
+        </div>
+        <div class="row" style="align-items:center">
           <label class="field grow" for="set-rounds" style="margin:0">Nombre de manches</label>
           <input id="set-rounds" type="number" min="1" max="50" value="10" style="flex:0 0 90px" />
         </div>
         <div class="toggle">
           <input id="set-blind" type="checkbox" checked />
-          <label for="set-blind">Blind test : bonus si tu trouves aussi le titre</label>
+          <label for="set-blind">Blind test : bonus si tu trouves artiste + titre</label>
         </div>
       </div>
 
@@ -101,16 +109,19 @@
       <div id="found-feed" class="found-feed"></div>
       <div class="row" style="justify-content:space-between;align-items:center">
         <span class="timer-ring" id="round-label">Manche</span>
-        <span class="timer-ring">⏱ <b id="round-timer">30</b></span>
+        <span class="timer-ring">⏱ <b id="round-timer">15</b></span>
       </div>
-      <div class="stage">
+      <div class="stage" id="play-stage">
         <div class="disc spinning" id="play-disc"></div>
         <div class="countdown" id="play-countdown" style="display:none">3</div>
       </div>
-      <h2 style="text-align:center">De qui vient ce morceau&nbsp;?</h2>
+      <div id="quiz-question" class="quiz-question" style="display:none">
+        <p id="quiz-text" class="quiz-text"></p>
+      </div>
+      <h2 style="text-align:center" id="play-heading">De qui vient ce morceau&nbsp;?</h2>
       <div class="guess-grid" id="guess-grid"></div>
       <div id="blind-wrap" style="display:none">
-        <label class="field" for="blind-input">Bien joué ! Bonus : trouve le titre</label>
+        <label class="field" for="blind-input" id="blind-label">Bonus</label>
         <input id="blind-input" type="text" placeholder="Titre de la chanson…" autocomplete="off" />
         <button id="btn-title" class="btn-primary" style="margin-top:8px;font-size:16px">Valider le titre</button>
       </div>
