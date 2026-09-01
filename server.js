@@ -1,234 +1,620 @@
-// music.js — import de playlists et resolution des extraits audio.
-//
-// Source audio : l'API publique de Deezer, qui fournit des extraits MP3 de 30s
-// gratuitement, sans cle ni login. On l'appelle cote serveur (le front ne peut
-// pas a cause du CORS Deezer).
-//
-// - Lien Deezer  -> lecture directe des pistes (chaque piste a deja son extrait).
-// - Lien Spotify -> le joueur s'authentifie via OAuth (Authorization Code), puis
-//                   on lit sa tracklist avec son token personnel et on matche
-//                   chaque piste sur Deezer par ISRC ou par recherche pour
-//                   recuperer l'extrait jouable.
+// server.js — backend temps reel du jeu.
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const path = require('path');
+const { importPlaylist, normalizeTitle } = require('./music');
 
-const DEEZER = 'https://api.deezer.com';
+const app = express();
+app.set('trust proxy', 1); // Render / Railway sont derriere un reverse proxy
+const server = http.createServer(app);
+const io = new Server(server);
 
-// ---------- utilitaires ----------
+app.use(express.static(path.join(__dirname, 'public')));
+app.get('/health', (_, res) => res.send('ok'));
 
-async function getJson(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'whose-song/1.0' } });
-  if (!res.ok) throw new Error(`HTTP ${res.status} sur ${url}`);
-  return res.json();
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`Whose Song sur http://localhost:${PORT}`));
+
+// ---------------------------------------------------------------------------
+// Etat en memoire
+// ---------------------------------------------------------------------------
+const rooms = new Map(); // code -> room
+
+function makeCode() {
+  const abc = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  let c;
+  do { c = Array.from({ length: 4 }, () => abc[Math.floor(Math.random() * abc.length)]).join(''); }
+  while (rooms.has(c));
+  return c;
 }
 
-// Nettoie un titre pour comparer ("Song (Remastered 2011) - feat. X" -> "song")
-function normalizeTitle(s) {
-  return (s || '')
-    .toLowerCase()
-    .replace(/\(.*?\)|\[.*?\]/g, ' ')                       // parentheses / crochets
-    .replace(/\b(feat|ft|featuring|with)\b.*$/i, ' ')       // featurings
-    .replace(/-\s*(remaster|remastered|radio edit|live|mono|stereo|version).*$/i, ' ')
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')                      // ponctuation
-    .replace(/\s+/g, ' ')
-    .trim();
+function newRoom(code) {
+  return {
+    code,
+    hostId: null,
+    phase: 'lobby',                 // lobby | playing | reveal | finished
+    players: new Map(),             // playerId -> { id, name, avatar, socketId, connected, score, tracks:[], ready:false, ... }
+    settings: { rounds: 10, blindTest: true, clipMs: 15000 },
+    songs: [],                      // pool retenu (exclusifs), melange
+    roundIndex: -1,
+    round: null,                    // { song, startAt, deadline, votes:Map, revealed:bool }
+    timer: null,
+  };
 }
 
-// ---------- detection du lien ----------
+const shuffle = (a) => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+const songKey = (t) => t.deezerId ? `d:${t.deezerId}` : `${normalizeTitle(t.artist)}|${normalizeTitle(t.title)}`;
 
-// Suit les redirections des liens courts (link.deezer.com, spotify.link, etc.)
-async function expandUrl(url) {
-  try {
-    const res = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': 'Mozilla/5.0' } });
-    return res.url || url;
-  } catch {
-    return url;
+const AVATARS = ['🎸', '🎹', '🎺', '🎻', '🥁', '🎤', '🎧', '🪗', '🎷', '🪘', '🪕', '🔔'];
+function pickAvatar(room) {
+  const used = new Set([...room.players.values()].map(p => p.avatar));
+  return AVATARS.find(a => !used.has(a)) || AVATARS[room.players.size % AVATARS.length];
+}
+
+// ---------------------------------------------------------------------------
+// OAuth Spotify — Authorization Code Flow
+// ---------------------------------------------------------------------------
+const SPOTIFY_CALLBACK_PATH = '/auth/spotify/callback';
+
+// Verifie que le serveur a les identifiants Spotify configures
+function spotifyConfigured() {
+  return !!(process.env.SPOTIFY_CLIENT_ID && process.env.SPOTIFY_CLIENT_SECRET);
+}
+
+// GET /auth/spotify?roomCode=XXXX&playerId=p_xxxxxxx
+// Redirige le joueur vers l'ecran d'autorisation Spotify.
+app.get('/auth/spotify', (req, res) => {
+  if (!spotifyConfigured()) {
+    return res.status(500).send('Spotify non configure sur ce serveur (SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET manquants).');
   }
-}
 
-async function detectPlaylist(rawUrl) {
-  let url = rawUrl.trim();
-  if (/link\.deezer\.com|deezer\.page\.link|spotify\.link/.test(url)) {
-    url = await expandUrl(url);
-  }
+  const { roomCode, playerId } = req.query;
+  if (!roomCode || !playerId) return res.status(400).send('Parametres manquants.');
 
-  let m = url.match(/deezer\.com\/(?:[a-z]{2}\/)?playlist\/(\d+)/i);
-  if (m) return { provider: 'deezer', id: m[1] };
+  const redirectUri = `${req.protocol}://${req.get('host')}${SPOTIFY_CALLBACK_PATH}`;
+  const state = Buffer.from(JSON.stringify({ roomCode, playerId })).toString('base64url');
+  const scopes = 'playlist-read-private playlist-read-collaborative';
 
-  m = url.match(/open\.spotify\.com\/(?:[a-z-]+\/)?playlist\/([A-Za-z0-9]+)/i);
-  if (m) return { provider: 'spotify', id: m[1] };
-
-  // ID Deezer brut colle tel quel
-  if (/^\d{5,}$/.test(url)) return { provider: 'deezer', id: url };
-
-  return null;
-}
-
-// ---------- Deezer ----------
-
-async function importDeezerPlaylist(id) {
-  const meta = await getJson(`${DEEZER}/playlist/${id}`);
-  if (meta.error) throw new Error(`Playlist Deezer introuvable (${meta.error.message || 'erreur'})`);
-
-  const tracks = [];
-  let next = `${DEEZER}/playlist/${id}/tracks?limit=100&index=0`;
-  let guard = 0;
-  while (next && guard++ < 50) {
-    const page = await getJson(next);
-    for (const t of page.data || []) {
-      if (!t.preview) continue; // pas d'extrait dispo -> inutilisable
-      tracks.push({
-        title: t.title_short || t.title,
-        artist: t.artist && t.artist.name,
-        preview: t.preview,
-        cover: t.album && (t.album.cover_medium || t.album.cover),
-        deezerId: t.id,
-      });
-    }
-    next = page.next || null;
-  }
-  return { provider: 'deezer', name: meta.title || 'Playlist Deezer', tracks };
-}
-
-// ---------- Spotify (OAuth Authorization Code) ----------
-
-// Client Credentials — garde en fallback (fonctionne uniquement pour les
-// playlists du compte dev lui-meme depuis fev. 2026).
-let spotifyToken = { value: null, exp: 0 };
-
-async function getSpotifyToken() {
-  const id = process.env.SPOTIFY_CLIENT_ID;
-  const secret = process.env.SPOTIFY_CLIENT_SECRET;
-  if (!id || !secret) {
-    throw new Error(
-      "Import Spotify non configure. Ajoute SPOTIFY_CLIENT_ID et SPOTIFY_CLIENT_SECRET " +
-      "cote serveur, ou connecte-toi a Spotify depuis le lobby."
-    );
-  }
-  if (spotifyToken.value && Date.now() < spotifyToken.exp) return spotifyToken.value;
-
-  const res = await fetch('https://accounts.spotify.com/api/token', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      Authorization: 'Basic ' + Buffer.from(`${id}:${secret}`).toString('base64'),
-    },
-    body: 'grant_type=client_credentials',
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: process.env.SPOTIFY_CLIENT_ID,
+    scope: scopes,
+    redirect_uri: redirectUri,
+    state,
+    show_dialog: 'false',
   });
-  if (!res.ok) throw new Error('Authentification Spotify echouee (verifie tes identifiants).');
-  const data = await res.json();
-  spotifyToken = { value: data.access_token, exp: Date.now() + (data.expires_in - 60) * 1000 };
-  return spotifyToken.value;
-}
 
-// Lit les pistes d'une playlist Spotify.
-// userToken = token OAuth du joueur (Authorization Code flow).
-// Sans userToken on tente Client Credentials (limité depuis fev. 2026).
-async function fetchSpotifyTracks(id, userToken) {
-  let token;
-  if (userToken) {
-    token = userToken;
-  } else {
-    token = await getSpotifyToken();
+  res.redirect(`https://accounts.spotify.com/authorize?${params}`);
+});
+
+// GET /auth/spotify/callback — Spotify redirige ici apres l'autorisation.
+// Echange le code contre un token, le stocke sur le joueur, et renvoie
+// l'utilisateur vers l'app.
+app.get(SPOTIFY_CALLBACK_PATH, async (req, res) => {
+  const { code, state, error } = req.query;
+
+  if (error) {
+    return res.send(`<!DOCTYPE html><html><head><title>Whose Song</title></head>
+<body style="background:#14091f;color:#f3ecff;font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">
+<div style="text-align:center">
+<p style="color:#a99cc4">Connexion annulée. Ferme cet onglet.</p>
+</div>
+<script>try { window.close(); } catch(e) {}</script></body></html>`);
   }
-  const auth = { headers: { Authorization: `Bearer ${token}` } };
 
-  const meta = await fetch(`https://api.spotify.com/v1/playlists/${id}?fields=name`, auth).then(r => r.json());
-  if (meta.error) throw new Error(`Spotify : ${meta.error.message}`);
-  const name = meta.name || 'Playlist Spotify';
-
-  const out = [];
-  // Endpoint renomme en fev. 2026 : /tracks -> /items
-  let url = `https://api.spotify.com/v1/playlists/${id}/items?limit=100`;
-  let guard = 0;
-  while (url && guard++ < 50) {
-    const page = await fetch(url, auth).then(r => r.json());
-    if (page.error) throw new Error(`Spotify : ${page.error.message}`);
-    for (const it of page.items || []) {
-      // Depuis fev. 2026 le champ s'appelle "item" ; on garde "track" en fallback
-      const t = it.track || it.item;
-      if (!t) continue;
-      out.push({
-        title: t.name,
-        artist: t.artists && t.artists[0] && t.artists[0].name,
-        isrc: t.external_ids && t.external_ids.isrc,
-      });
-    }
-    url = page.next;
-  }
-  return { name, spotifyTracks: out };
-}
-
-// Matche une piste Spotify sur Deezer pour recuperer l'extrait MP3.
-async function matchOnDeezer(track) {
-  // 1) par ISRC (tres precis)
-  if (track.isrc) {
-    try {
-      const t = await getJson(`${DEEZER}/track/isrc:${track.isrc}`);
-      if (t && t.preview && !t.error) {
-        return {
-          title: t.title_short || t.title,
-          artist: t.artist && t.artist.name,
-          preview: t.preview,
-          cover: t.album && (t.album.cover_medium || t.album.cover),
-          deezerId: t.id,
-        };
-      }
-    } catch { /* on tente la recherche */ }
-  }
-  // 2) par recherche artiste + titre
+  let roomCode, playerId;
   try {
-    const q = encodeURIComponent(`artist:"${track.artist}" track:"${track.title}"`);
-    const r = await getJson(`${DEEZER}/search?q=${q}&limit=5`);
-    const want = normalizeTitle(track.title);
-    const hit = (r.data || []).find(d => d.preview && normalizeTitle(d.title).includes(want.split(' ')[0]))
-             || (r.data || []).find(d => d.preview);
-    if (hit) {
-      return {
-        title: hit.title_short || hit.title,
-        artist: hit.artist && hit.artist.name,
-        preview: hit.preview,
-        cover: hit.album && (hit.album.cover_medium || hit.album.cover),
-        deezerId: hit.id,
-      };
+    const parsed = JSON.parse(Buffer.from(state, 'base64url').toString());
+    roomCode = parsed.roomCode;
+    playerId = parsed.playerId;
+  } catch {
+    return res.status(400).send('State invalide.');
+  }
+
+  const redirectUri = `${req.protocol}://${req.get('host')}${SPOTIFY_CALLBACK_PATH}`;
+
+  try {
+    const tokenRes = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: 'Basic ' + Buffer.from(
+          `${process.env.SPOTIFY_CLIENT_ID}:${process.env.SPOTIFY_CLIENT_SECRET}`
+        ).toString('base64'),
+      },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: redirectUri,
+      }),
+    });
+
+    const tokenData = await tokenRes.json();
+    if (tokenData.error) {
+      console.error('Spotify token exchange error:', tokenData);
+      throw new Error(tokenData.error_description || tokenData.error);
     }
-  } catch { /* rien trouve */ }
-  return null;
+
+    // Stocke le token sur le joueur dans la room
+    const room = rooms.get(roomCode);
+    if (room) {
+      const player = room.players.get(playerId);
+      if (player) {
+        player.spotifyToken = tokenData.access_token;
+        player.spotifyRefreshToken = tokenData.refresh_token || null;
+        player.spotifyTokenExp = Date.now() + (tokenData.expires_in || 3600) * 1000;
+        // Le joueur est toujours connecte (popup, pas redirect) -> broadcast
+        if (player.connected) broadcast(room);
+      }
+    }
+
+    // Page qui notifie l'onglet principal et se ferme
+    res.send(`<!DOCTYPE html><html><head><title>Whose Song</title></head>
+<body style="background:#14091f;color:#f3ecff;font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">
+<div style="text-align:center">
+<h2 style="color:#1db954">Connecté à Spotify ✓</h2>
+<p style="color:#a99cc4">Tu peux fermer cet onglet et retourner au jeu.</p>
+</div>
+<script>
+try { window.opener && window.opener.postMessage({ type: 'spotify-connected' }, '*'); } catch(e) {}
+try { window.close(); } catch(e) {}
+</script></body></html>`);
+  } catch (e) {
+    console.error('Spotify OAuth error:', e.message);
+    res.send(`<!DOCTYPE html><html><head><title>Whose Song</title></head>
+<body style="background:#14091f;color:#f3ecff;font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">
+<div style="text-align:center">
+<h2 style="color:#ff6b6b">Erreur Spotify</h2>
+<p style="color:#a99cc4">${e.message || 'Réessaie.'}</p>
+<p style="color:#a99cc4">Ferme cet onglet et retente depuis le lobby.</p>
+</div></body></html>`);
+  }
+});
+
+// GET /auth/spotify/check — le client verifie si Spotify est configure
+app.get('/auth/spotify/check', (_, res) => {
+  res.json({ available: spotifyConfigured() });
+});
+
+// ---------------------------------------------------------------------------
+// Vue envoyee aux clients (on cache le proprietaire et, en blind test, le titre)
+// ---------------------------------------------------------------------------
+function publicState(room) {
+  const players = [...room.players.values()].map(p => ({
+    id: p.id, name: p.name, avatar: p.avatar || '🎵', connected: p.connected, score: p.score,
+    trackCount: p.tracks.length, ready: p.ready,
+    isHost: p.id === room.hostId,
+    spotifyConnected: !!p.spotifyToken,
+  }));
+
+  const base = { code: room.code, phase: room.phase, hostId: room.hostId, settings: room.settings, players };
+
+  if (room.phase === 'playing' && room.round) {
+    const r = room.round;
+    base.round = {
+      index: room.roundIndex, total: room.songs.length,
+      startAt: r.startAt, deadline: r.deadline,
+      preview: r.song.preview,
+      // titre/cover masques pendant la devinette
+      voted: [...r.votes.keys()],
+    };
+  }
+
+  if (room.phase === 'reveal' && room.round) {
+    const r = room.round, s = r.song;
+    const owner = room.players.get(s.ownerId);
+    base.round = {
+      index: room.roundIndex, total: room.songs.length,
+      ownerId: s.ownerId, ownerName: owner ? owner.name : '?',
+      title: s.title, artist: s.artist, cover: s.cover, preview: s.preview,
+      votes: [...r.votes.entries()].map(([voter, v]) => {
+        // Calcul du score de rapidite (pour affichage)
+        let speedPts = 0, elapsedSec = 0;
+        if (v.ownerId === s.ownerId) {
+          const elapsed = Math.max(0, v.timestamp - r.startAt);
+          const ratio = Math.min(1, elapsed / room.settings.clipMs);
+          speedPts = Math.max(10, Math.round(100 - 90 * ratio));
+          elapsedSec = Math.round(elapsed / 100) / 10; // 1 decimale
+        }
+        return {
+          voter, guessOwner: v.ownerId,
+          correctOwner: v.ownerId === s.ownerId,
+          titleGuess: v.title || null,
+          correctTitle: v.titleCorrect || false,
+          speedPts,
+          elapsedSec,
+        };
+      }),
+      deltas: r.deltas || {},
+    };
+  }
+
+  if (room.phase === 'finished') {
+    base.ranking = [...room.players.values()]
+      .map(p => ({ id: p.id, name: p.name, score: p.score }))
+      .sort((a, b) => b.score - a.score);
+  }
+
+  return base;
 }
 
-async function importSpotifyPlaylist(id, userToken) {
-  // Si pas de token utilisateur et pas de Client Credentials -> message clair
-  if (!userToken && !process.env.SPOTIFY_CLIENT_ID) {
-    throw new Error(
-      "Connecte-toi a Spotify (bouton vert dans le lobby) pour importer cette playlist."
-    );
+function broadcast(room) { io.to(room.code).emit('state', publicState(room)); }
+
+// ---------------------------------------------------------------------------
+// Deroulement d'une partie
+// ---------------------------------------------------------------------------
+function buildPool(room) {
+  const owners = new Map(); // key -> { track, ownerIds:Set }
+  for (const p of room.players.values()) {
+    const seen = new Set(); // dedup interne au joueur
+    for (const t of p.tracks) {
+      const k = songKey(t);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      if (!owners.has(k)) owners.set(k, { track: t, ownerIds: new Set() });
+      owners.get(k).ownerIds.add(p.id);
+    }
   }
 
-  const { name, spotifyTracks } = await fetchSpotifyTracks(id, userToken);
-  // Matching en parallele mais par petits lots pour rester poli avec l'API Deezer.
-  const tracks = [];
-  const BATCH = 6;
-  for (let i = 0; i < spotifyTracks.length; i += BATCH) {
-    const batch = spotifyTracks.slice(i, i + BATCH);
-    const results = await Promise.all(batch.map(matchOnDeezer));
-    for (const r of results) if (r) tracks.push(r);
+  // Grouper les morceaux exclusifs par proprietaire
+  const byOwner = new Map();
+  for (const { track, ownerIds } of owners.values()) {
+    if (ownerIds.size !== 1) continue; // union disjointe : on jette l'intersection
+    const ownerId = [...ownerIds][0];
+    if (!byOwner.has(ownerId)) byOwner.set(ownerId, []);
+    byOwner.get(ownerId).push({ ...track, ownerId });
   }
-  return { provider: 'spotify', name, tracks, requested: spotifyTracks.length };
-}
 
-// ---------- point d'entree ----------
+  // Melanger les morceaux de chaque joueur independamment
+  for (const songs of byOwner.values()) shuffle(songs);
 
-async function importPlaylist(rawUrl, spotifyUserToken) {
-  const info = await detectPlaylist(rawUrl);
-  if (!info) {
-    throw new Error("Lien non reconnu. Colle un lien de playlist Deezer ou Spotify.");
+  // Round-robin pour equilibrer le nombre de morceaux par joueur
+  const players = [...byOwner.keys()];
+  const indices = new Map(players.map(p => [p, 0]));
+  const balanced = [];
+
+  let added = true;
+  while (added) {
+    added = false;
+    for (const pid of players) {
+      const songs = byOwner.get(pid);
+      const i = indices.get(pid);
+      if (i < songs.length) {
+        balanced.push(songs[i]);
+        indices.set(pid, i + 1);
+        added = true;
+      }
+    }
   }
-  const result = info.provider === 'deezer'
-    ? await importDeezerPlaylist(info.id)
-    : await importSpotifyPlaylist(info.id, spotifyUserToken);
 
-  if (!result.tracks.length) {
-    throw new Error("Aucun extrait jouable trouve dans cette playlist.");
-  }
+  // Melange total : equilibre garanti, ordre imprevisible
+  return shuffle(balanced);
+
   return result;
 }
 
-module.exports = { importPlaylist, normalizeTitle };
+function startGame(room) {
+  const pool = buildPool(room);
+  if (pool.length === 0) {
+    io.to(room.code).emit('error:msg', "Aucun morceau n'est unique a un seul joueur. Ajoutez des playlists plus variees.");
+    return;
+  }
+  room.songs = pool.slice(0, Math.min(room.settings.rounds, pool.length));
+  for (const p of room.players.values()) { p.score = 0; p.ready = false; }
+  room.roundIndex = -1;
+  room.phase = 'playing';
+  // On attend que tout le monde ait debloque l'audio (player:ready) avant la manche 1.
+  room.phase = 'lobby-ready';
+  broadcast(room);
+}
+
+function maybeStartFirstRound(room) {
+  const active = [...room.players.values()].filter(p => p.connected);
+  if (active.length && active.every(p => p.ready)) nextRound(room);
+}
+
+function nextRound(room) {
+  clearTimeout(room.timer);
+  room.roundIndex++;
+  if (room.roundIndex >= room.songs.length) return endGame(room);
+
+  const song = room.songs[room.roundIndex];
+  const startAt = Date.now() + 3000;                 // decompte 3s synchronise
+  const deadline = startAt + room.settings.clipMs;   // fin de la fenetre de reponse
+  room.phase = 'playing';
+  room.round = { song, startAt, deadline, votes: new Map(), revealed: false, deltas: null };
+  broadcast(room);
+
+  room.timer = setTimeout(() => reveal(room), (deadline - Date.now()) + 500);
+}
+
+function everyoneVoted(room) {
+  const voters = [...room.players.values()].filter(p => p.connected && p.id !== room.round.song.ownerId);
+  return voters.length > 0 && voters.every(p => room.round.votes.has(p.id));
+}
+
+function reveal(room) {
+  clearTimeout(room.timer);
+  if (!room.round || room.round.revealed) return;
+  room.round.revealed = true;
+
+  const s = room.round.song;
+  const r = room.round;
+  const deltas = {};
+  const add = (id, n) => { deltas[id] = (deltas[id] || 0) + n; };
+
+  let fooled = 0;
+  for (const [voterId, v] of r.votes.entries()) {
+    if (v.ownerId === s.ownerId) {
+      // Bonne reponse : score degressif (tout le monde, proprio inclus)
+      const elapsed = Math.max(0, v.timestamp - r.startAt);
+      const ratio = Math.min(1, elapsed / room.settings.clipMs);
+      const pts = Math.max(10, Math.round(100 - 90 * ratio));
+      add(voterId, pts);
+    } else if (voterId !== s.ownerId) {
+      // Mauvaise reponse d'un non-proprio = piege
+      fooled++;
+    }
+    // Le proprio qui se trompe ne compte pas comme piege (on ne se piege pas soi-meme)
+    if (v.titleCorrect) add(voterId, 50);              // bonus blind test (fixe)
+  }
+  if (fooled > 0) add(s.ownerId, fooled * 20);          // points "piege"
+
+  for (const [id, n] of Object.entries(deltas)) {
+    const p = room.players.get(id); if (p) p.score += n;
+  }
+  room.round.deltas = deltas;
+  room.phase = 'reveal';
+  broadcast(room);
+}
+
+function endGame(room) {
+  clearTimeout(room.timer);
+  room.phase = 'finished';
+  room.round = null;
+  broadcast(room);
+}
+
+// ---------------------------------------------------------------------------
+// Socket.IO
+// ---------------------------------------------------------------------------
+io.on('connection', (socket) => {
+  let joined = null; // { code, playerId }
+
+  const room = () => joined && rooms.get(joined.code);
+  const me = () => { const r = room(); return r && r.players.get(joined.playerId); };
+  const isHost = () => { const r = room(); return r && r.hostId === joined.playerId; };
+
+  function attach(r, player) {
+    joined = { code: r.code, playerId: player.id };
+    socket.join(r.code);
+  }
+
+  socket.on('room:create', ({ name }, cb) => {
+    const code = makeCode();
+    const r = newRoom(code);
+    rooms.set(code, r);
+    const id = 'p_' + Math.random().toString(36).slice(2, 9);
+    const player = { id, name: (name || 'Joueur').slice(0, 20), avatar: pickAvatar(r), socketId: socket.id, connected: true, score: 0, tracks: [], ready: false };
+    r.players.set(id, player);
+    r.hostId = id;
+    attach(r, player);
+    cb && cb({ ok: true, code, playerId: id });
+    socket.emit('state', publicState(r));
+    broadcast(r);
+  });
+
+  socket.on('room:join', ({ code, name }, cb) => {
+    code = (code || '').toUpperCase().trim();
+    const r = rooms.get(code);
+    if (!r) return cb && cb({ ok: false, error: "Salon introuvable." });
+    name = (name || 'Joueur').slice(0, 20);
+
+    let player = [...r.players.values()].find(p => p.name.toLowerCase() === name.toLowerCase() && !p.connected);
+    if (player) { player.connected = true; player.socketId = socket.id; }
+    else {
+      if (r.phase !== 'lobby') return cb && cb({ ok: false, error: "Partie deja commencee." });
+      const id = 'p_' + Math.random().toString(36).slice(2, 9);
+      player = { id, name, avatar: pickAvatar(r), socketId: socket.id, connected: true, score: 0, tracks: [], ready: false };
+      r.players.set(id, player);
+    }
+    attach(r, player);
+    cb && cb({ ok: true, code, playerId: player.id });
+    socket.emit('state', publicState(r));
+    broadcast(r);
+  });
+
+  // Reconnexion par ID (apres redirect OAuth Spotify ou retour d'onglet)
+  socket.on('room:rejoin', ({ code, playerId }, cb) => {
+    code = (code || '').toUpperCase().trim();
+    const r = rooms.get(code);
+    if (!r) return cb && cb({ ok: false, error: "Salon introuvable." });
+    const player = r.players.get(playerId);
+    if (!player) return cb && cb({ ok: false, error: "Joueur introuvable." });
+    player.connected = true;
+    player.socketId = socket.id;
+    attach(r, player);
+    cb && cb({ ok: true, code, playerId: player.id });
+    socket.emit('state', publicState(r));
+    broadcast(r);
+  });
+
+  socket.on('playlist:add', async ({ url }, cb) => {
+    const r = room(), p = me();
+    if (!r || !p) return cb && cb({ ok: false, error: "Rejoins un salon d'abord." });
+    if (r.phase !== 'lobby') return cb && cb({ ok: false, error: "Trop tard, la partie a commence." });
+    try {
+      // On passe le token Spotify du joueur s'il en a un
+      const result = await importPlaylist(url, p.spotifyToken || null);
+      const existing = new Set(p.tracks.map(songKey));
+      let added = 0;
+      for (const t of result.tracks) { if (!existing.has(songKey(t))) { p.tracks.push(t); existing.add(songKey(t)); added++; } }
+      cb && cb({ ok: true, name: result.name, added, total: p.tracks.length, matched: result.tracks.length, requested: result.requested,
+        savedTracks: result.tracks.map(t => ({ title: t.title, artist: t.artist, preview: t.preview, cover: t.cover, deezerId: t.deezerId }))
+      });
+      broadcast(r);
+    } catch (e) {
+      cb && cb({ ok: false, error: e.message || "Import impossible." });
+    }
+  });
+
+  socket.on('playlist:clear', (cb) => {
+    const p = me(), r = room();
+    if (p) { p.tracks = []; broadcast(r); }
+    cb && cb({ ok: true });
+  });
+
+  // Charger une playlist sauvegardee (pistes deja resolues, pas d'appel API)
+  socket.on('playlist:load', ({ name, tracks }, cb) => {
+    const r = room(), p = me();
+    if (!r || !p) return cb && cb({ ok: false, error: "Rejoins un salon d'abord." });
+    if (r.phase !== 'lobby') return cb && cb({ ok: false, error: "Trop tard, la partie a commence." });
+    if (!Array.isArray(tracks)) return cb && cb({ ok: false, error: "Donnees invalides." });
+    const existing = new Set(p.tracks.map(songKey));
+    let added = 0;
+    for (const t of tracks) {
+      if (!t.title || !t.preview) continue;
+      if (!existing.has(songKey(t))) { p.tracks.push(t); existing.add(songKey(t)); added++; }
+    }
+    cb && cb({ ok: true, name: name || 'Playlist', added, total: p.tracks.length });
+    broadcast(r);
+  });
+
+  socket.on('settings:update', (s) => {
+    const r = room();
+    if (!r || !isHost() || r.phase !== 'lobby') return;
+    if (typeof s.rounds === 'number') r.settings.rounds = Math.max(1, Math.min(50, s.rounds | 0));
+    if (typeof s.blindTest === 'boolean') r.settings.blindTest = s.blindTest;
+    broadcast(r);
+  });
+
+  socket.on('game:start', () => {
+    const r = room();
+    if (!r || !isHost() || r.phase !== 'lobby') return;
+    const active = [...r.players.values()].filter(p => p.connected);
+    if (active.length < 2) return io.to(r.code).emit('error:msg', "Il faut au moins 2 joueurs.");
+    startGame(r);
+  });
+
+  socket.on('player:ready', () => {
+    const r = room(), p = me();
+    if (!r || !p) return;
+    p.ready = true;
+    broadcast(r);
+    if (r.phase === 'lobby-ready') maybeStartFirstRound(r);
+  });
+
+  socket.on('round:guess', ({ ownerId }) => {
+    const r = room(), p = me();
+    if (!r || !p || r.phase !== 'playing' || !r.round) return;
+    if (r.round.votes.has(p.id)) return;                 // un seul vote
+
+    const s = r.round.song;
+    const correct = ownerId === s.ownerId;
+
+    r.round.votes.set(p.id, {
+      ownerId,
+      timestamp: Date.now(),
+      title: null,
+      titleCorrect: false,
+    });
+
+    // Resultat prive : le joueur sait s'il a bon (pour afficher le blind test)
+    socket.emit('round:your-result', { correct });
+    // Notification a tout le salon si bonne reponse
+    if (correct) {
+      io.to(r.code).emit('round:found', { name: p.name, avatar: p.avatar || '🎵' });
+    }
+    broadcast(r);
+    // Pas d'auto-reveal : le timer tourne toujours jusqu'au bout
+  });
+
+  // Blind test : le joueur soumet le titre APRES avoir trouve le bon proprietaire
+  socket.on('round:guess-title', ({ title }) => {
+    const r = room(), p = me();
+    if (!r || !p || r.phase !== 'playing' || !r.round) return;
+
+    const vote = r.round.votes.get(p.id);
+    if (!vote) return;                                   // pas encore vote
+    if (vote.ownerId !== r.round.song.ownerId) return;   // mauvaise reponse -> pas de blind test
+    if (vote.title !== null) return;                      // deja soumis
+
+    let titleCorrect = false;
+    if (r.settings.blindTest && title) {
+      const g = normalizeTitle(title), real = normalizeTitle(r.round.song.title);
+      titleCorrect = !!g && (real.includes(g) || g.includes(real) ||
+        real.split(' ').filter(w => w.length > 2 && g.includes(w)).length >= Math.min(2, real.split(' ').length));
+    }
+    vote.title = title || null;
+    vote.titleCorrect = titleCorrect;
+    broadcast(r);
+  });
+
+  socket.on('round:next', () => {
+    const r = room();
+    if (!r || !isHost()) return;
+    if (r.phase === 'reveal') nextRound(r);
+  });
+
+  socket.on('game:restart', () => {
+    const r = room();
+    if (!r || !isHost()) return;
+    r.phase = 'lobby'; r.songs = []; r.round = null; r.roundIndex = -1;
+    for (const p of r.players.values()) { p.score = 0; p.ready = false; }
+    clearTimeout(r.timer);
+    broadcast(r);
+  });
+
+  // L'hote arrete la partie / ferme le salon — fonctionne a tout moment
+  socket.on('game:stop', () => {
+    const r = room();
+    if (!r || !isHost()) return;
+    clearTimeout(r.timer);
+    if (r.phase === 'lobby') {
+      // Fermer le salon : tout le monde retourne a l'accueil
+      io.to(r.code).emit('room:closed');
+      rooms.delete(r.code);
+    } else {
+      // Arreter la partie en cours -> classement final
+      r.phase = 'finished';
+      r.round = null;
+      broadcast(r);
+    }
+  });
+
+  // L'hote retire un joueur du salon
+  socket.on('player:kick', ({ playerId }) => {
+    const r = room();
+    if (!r || !isHost()) return;
+    if (playerId === r.hostId) return;                   // on ne se kick pas soi-meme
+    const target = r.players.get(playerId);
+    if (!target) return;
+    // Prevenir et deconnecter le joueur kick
+    const targetSocket = io.sockets.sockets.get(target.socketId);
+    if (targetSocket) {
+      targetSocket.emit('kicked');
+      targetSocket.leave(r.code);
+    }
+    r.players.delete(playerId);
+    broadcast(r);
+  });
+
+  socket.on('disconnect', () => {
+    const r = room(), p = me();
+    if (!r || !p) return;
+    // Si un nouveau socket a pris le relais (rejoin apres OAuth), on ignore
+    if (p.socketId !== socket.id) return;
+    p.connected = false;
+    // si l'hote part, on transfere a un joueur connecte
+    if (r.hostId === p.id) {
+      const next = [...r.players.values()].find(x => x.connected);
+      if (next) r.hostId = next.id;
+    }
+    // salon vide -> nettoyage differe
+    if (![...r.players.values()].some(x => x.connected)) {
+      setTimeout(() => { const rr = rooms.get(r.code); if (rr && ![...rr.players.values()].some(x => x.connected)) rooms.delete(r.code); }, 5 * 60 * 1000);
+    }
+    broadcast(r);
+  });
+});
