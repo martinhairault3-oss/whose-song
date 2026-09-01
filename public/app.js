@@ -58,6 +58,12 @@ document.addEventListener('visibilitychange', () => {
     tryAutoRejoin();
     setTimeout(tryAutoRejoin, 500);
     setTimeout(tryAutoRejoin, 2000);
+    // Reprendre l'audio si on est en jeu
+    try {
+      if (audio && audio.paused && st && st.phase === 'playing' && st.round) {
+        audio.play().catch(() => {});
+      }
+    } catch {}
   }
 });
 
@@ -73,6 +79,7 @@ function toast(msg) {
 const myPlayer = () => st && st.players.find(p => p.id === me.playerId);
 const isHost = () => st && st.hostId === me.playerId;
 const playerName = (id) => { const p = st && st.players.find(x => x.id === id); return p ? p.name : '?'; };
+const playerLabel = (id) => { const p = st && st.players.find(x => x.id === id); return p ? `${p.avatar} ${p.name}` : '?'; };
 function clearTimers() { scheduleTimers.forEach(clearTimeout); scheduleTimers = []; }
 
 // ---------- Spotify OAuth : verifier dispo au chargement ----------
@@ -119,9 +126,70 @@ $('btn-copy').onclick = (e) => {
   e.stopPropagation();
   if (st) navigator.clipboard?.writeText(st.code).then(() => toast('Code copié : ' + st.code));
 };
+
+// --- Playlists sauvegardees (localStorage) ---
+function getSavedPlaylists() {
+  try { return JSON.parse(localStorage.getItem('saved_playlists') || '[]'); } catch { return []; }
+}
+function savePlaylists(list) {
+  try { localStorage.setItem('saved_playlists', JSON.stringify(list)); } catch {}
+}
+function savePlaylistData(name, url, tracks) {
+  const list = getSavedPlaylists();
+  // Eviter les doublons par URL
+  const existing = list.findIndex(p => p.url === url);
+  const entry = { name, url, tracks: tracks.map(t => ({ title: t.title, artist: t.artist, preview: t.preview, cover: t.cover, deezerId: t.deezerId })), savedAt: Date.now() };
+  if (existing >= 0) list[existing] = entry; else list.push(entry);
+  savePlaylists(list);
+}
+function removeSavedPlaylist(url) {
+  savePlaylists(getSavedPlaylists().filter(p => p.url !== url));
+}
+function loadSavedPlaylist(entry) {
+  socket.emit('playlist:load', { name: entry.name, tracks: entry.tracks }, (res) => {
+    if (res && res.ok) {
+      $('pl-status').textContent = `« ${res.name} » : +${res.added} morceaux (total ${res.total}).`;
+      renderSavedPlaylists();
+    } else {
+      toast(res && res.error || 'Erreur de chargement.');
+    }
+  });
+}
+function renderSavedPlaylists() {
+  const box = $('saved-playlists');
+  if (!box) return;
+  const list = getSavedPlaylists();
+  if (list.length === 0) { box.style.display = 'none'; return; }
+  box.style.display = 'flex';
+  const container = $('saved-list');
+  container.innerHTML = '';
+  for (const entry of list) {
+    const row = document.createElement('div');
+    row.className = 'saved-row';
+    row.innerHTML = `<span class="saved-name">🎵 ${escapeHtml(entry.name)} <span class="small">(${entry.tracks.length})</span></span>`;
+    const btns = document.createElement('span');
+    btns.className = 'saved-btns';
+    const load = document.createElement('button');
+    load.className = 'btn-ghost saved-btn';
+    load.textContent = 'Charger';
+    load.onclick = () => loadSavedPlaylist(entry);
+    const del = document.createElement('button');
+    del.className = 'kick-btn';
+    del.textContent = '✕';
+    del.onclick = () => { removeSavedPlaylist(entry.url); renderSavedPlaylists(); };
+    btns.appendChild(load);
+    btns.appendChild(del);
+    row.appendChild(btns);
+    container.appendChild(row);
+  }
+}
+
+// Import par URL — sauvegarde auto dans localStorage
+let lastImportUrl = '';
 $('btn-add-pl').onclick = () => {
   const url = $('pl-url').value.trim();
   if (!url) return;
+  lastImportUrl = url;
   $('btn-add-pl').disabled = true;
   $('pl-status').textContent = 'Import en cours…';
   socket.emit('playlist:add', { url }, (res) => {
@@ -131,6 +199,11 @@ $('btn-add-pl').onclick = () => {
       let msg = `« ${res.name} » : +${res.added} morceaux (total ${res.total}).`;
       if (res.requested && res.matched < res.requested) msg += ` ${res.matched}/${res.requested} trouvés sur Deezer.`;
       $('pl-status').textContent = msg;
+      // Sauvegarde auto dans localStorage avec les vraies donnees de pistes
+      if (res.added > 0 && lastImportUrl && res.savedTracks) {
+        savePlaylistData(res.name, lastImportUrl, res.savedTracks);
+        renderSavedPlaylists();
+      }
     } else {
       $('pl-status').textContent = res && res.error || 'Import impossible.';
       toast(res && res.error || 'Import impossible.');
@@ -162,7 +235,7 @@ function renderLobby() {
     let extra = '';
     if (p.isHost) extra += ' <span class="host">hôte</span>';
     if (p.spotifyConnected) extra += ' <span class="spotify-badge">spotify</span>';
-    el.innerHTML = `<span class="dot"></span>${escapeHtml(p.name)}` +
+    el.innerHTML = `<span class="dot"></span>${p.avatar || '🎵'} ${escapeHtml(p.name)}` +
       extra +
       ` <span class="count">${p.trackCount}🎵</span>`;
     // Kick button (hote uniquement, pas sur soi-meme)
@@ -207,6 +280,9 @@ function renderLobby() {
   } else {
     spotifyWrap.style.display = 'none';
   }
+
+  // Playlists sauvegardees
+  renderSavedPlaylists();
 }
 
 // ---------- deblocage audio ----------
@@ -242,7 +318,7 @@ function renderPlay() {
     for (const p of st.players) {
       const b = document.createElement('button');
       b.className = 'guess-btn' + (picked === p.id ? ' picked' : '');
-      b.textContent = p.name;
+      b.textContent = `${p.avatar || '🎵'} ${p.name}`;
       b.onclick = () => { picked = p.id; renderPlay(); };
       grid.appendChild(b);
     }
@@ -275,13 +351,20 @@ function setupRound(r) {
   const disc = $('play-disc'); disc.classList.add('spinning');
   const cd = $('play-countdown');
 
-  // charge l'extrait
-  try { audio.pause(); } catch {}
+  // Fresh audio element chaque manche (evite les bugs de cache/state)
+  try { audio.pause(); audio.src = ''; } catch {}
+  audio = new Audio();
+  audio.preload = 'auto';
   audio.src = r.preview;
+  let audioRetries = 0;
+  audio.onerror = () => {
+    if (audioRetries < 3) { audioRetries++; audio.src = r.preview; audio.load(); }
+  };
   audio.load();
 
   const now = Date.now();
   const delay = r.startAt - now;
+  const clipSec = (r.deadline - r.startAt) / 1000;
 
   if (delay > 0) {
     // decompte 3-2-1
@@ -303,9 +386,12 @@ function setupRound(r) {
 
   function startClip() {
     const elapsed = Math.max(0, (Date.now() - r.startAt) / 1000);
-    if (audioUnlocked && elapsed < 30) {
-      try { audio.currentTime = Math.min(elapsed, 29.5); } catch {}
-      audio.play().catch(() => {});
+    if (audioUnlocked && elapsed < clipSec) {
+      try { audio.currentTime = Math.min(elapsed, clipSec - 0.5); } catch {}
+      audio.play().catch(() => {
+        // Retry apres un petit delai (mobile audio context suspendu)
+        setTimeout(() => audio.play().catch(() => {}), 300);
+      });
     }
     // fin d'extrait
     scheduleTimers.push(setTimeout(() => { try { audio.pause(); } catch {} }, Math.max(0, r.deadline - Date.now())));
@@ -342,13 +428,24 @@ socket.on('round:your-result', (data) => {
   if (st && st.phase === 'playing') renderPlay();
 });
 
+// Notification "X a trouvé !" visible par tout le monde
+socket.on('round:found', ({ name, avatar }) => {
+  const feed = $('found-feed');
+  if (!feed) return;
+  const msg = document.createElement('div');
+  msg.className = 'found-msg';
+  msg.textContent = `${avatar} ${name} a trouvé !`;
+  feed.appendChild(msg);
+  setTimeout(() => msg.remove(), 2500);
+});
+
 // ---------- reveal ----------
 function renderReveal() {
   clearTimers();
   try { audio.pause(); } catch {}
   const r = st.round;
   $('reveal-cover').src = r.cover || '';
-  $('reveal-owner').textContent = 'C\'était ' + r.ownerName;
+  $('reveal-owner').textContent = 'C\'était ' + (st.players.find(p => p.id === r.ownerId)?.avatar || '') + ' ' + r.ownerName;
   $('reveal-song').textContent = `${r.artist} — ${r.title}`;
 
   const box = $('reveal-results'); box.innerHTML = '';
@@ -359,12 +456,19 @@ function renderReveal() {
     let detail = '';
     if (v.correctOwner) {
       detail = `<span class="verdict ok">trouvé en ${v.elapsedSec}s → +${v.speedPts}</span>`;
-      if (v.correctTitle) detail += ' <span class="verdict ok">+ titre +50</span>';
+      // Afficher la tentative de titre (si blind test actif)
+      if (v.titleGuess) {
+        if (v.correctTitle) {
+          detail += ` <span class="verdict ok">« ${escapeHtml(v.titleGuess)} » ✓ +50</span>`;
+        } else {
+          detail += ` <span class="title-guess">« ${escapeHtml(v.titleGuess)} » ✗</span>`;
+        }
+      }
     } else {
-      detail = `<span class="verdict no">a dit ${escapeHtml(playerName(v.guessOwner))}</span>`;
+      detail = `<span class="verdict no">a dit ${escapeHtml(playerLabel(v.guessOwner))}</span>`;
     }
     const d = r.deltas[v.voter] || 0;
-    line.innerHTML = `<span>${escapeHtml(playerName(v.voter))}</span>` +
+    line.innerHTML = `<span>${escapeHtml(playerLabel(v.voter))}</span>` +
       `<span>${detail} <span class="delta">${d > 0 ? '+' + d : ''}</span></span>`;
     box.appendChild(line);
   }
@@ -373,7 +477,7 @@ function renderReveal() {
   if (od) {
     const line = document.createElement('div');
     line.className = 'result-line';
-    line.innerHTML = `<span>${escapeHtml(r.ownerName)} <span class="small">(a piégé)</span></span><span class="delta">+${od}</span>`;
+    line.innerHTML = `<span>${escapeHtml(playerLabel(r.ownerId))} <span class="small">(a piégé)</span></span><span class="delta">+${od}</span>`;
     box.appendChild(line);
   }
 
