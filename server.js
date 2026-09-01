@@ -34,8 +34,8 @@ function newRoom(code) {
     code,
     hostId: null,
     phase: 'lobby',                 // lobby | playing | reveal | finished
-    players: new Map(),             // playerId -> { id, name, socketId, connected, score, tracks:[], ready:false, spotifyToken?, spotifyRefreshToken?, spotifyTokenExp? }
-    settings: { rounds: 10, blindTest: true, clipMs: 30000 },
+    players: new Map(),             // playerId -> { id, name, avatar, socketId, connected, score, tracks:[], ready:false, ... }
+    settings: { rounds: 10, blindTest: true, clipMs: 15000 },
     songs: [],                      // pool retenu (exclusifs), melange
     roundIndex: -1,
     round: null,                    // { song, startAt, deadline, votes:Map, revealed:bool }
@@ -45,6 +45,12 @@ function newRoom(code) {
 
 const shuffle = (a) => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 const songKey = (t) => t.deezerId ? `d:${t.deezerId}` : `${normalizeTitle(t.artist)}|${normalizeTitle(t.title)}`;
+
+const AVATARS = ['🎸', '🎹', '🎺', '🎻', '🥁', '🎤', '🎧', '🪗', '🎷', '🪘', '🪕', '🔔'];
+function pickAvatar(room) {
+  const used = new Set([...room.players.values()].map(p => p.avatar));
+  return AVATARS.find(a => !used.has(a)) || AVATARS[room.players.size % AVATARS.length];
+}
 
 // ---------------------------------------------------------------------------
 // OAuth Spotify — Authorization Code Flow
@@ -176,7 +182,7 @@ app.get('/auth/spotify/check', (_, res) => {
 // ---------------------------------------------------------------------------
 function publicState(room) {
   const players = [...room.players.values()].map(p => ({
-    id: p.id, name: p.name, connected: p.connected, score: p.score,
+    id: p.id, name: p.name, avatar: p.avatar || '🎵', connected: p.connected, score: p.score,
     trackCount: p.tracks.length, ready: p.ready,
     isHost: p.id === room.hostId,
     spotifyConnected: !!p.spotifyToken,
@@ -263,10 +269,10 @@ function buildPool(room) {
   // Melanger les morceaux de chaque joueur independamment
   for (const songs of byOwner.values()) shuffle(songs);
 
-  // Round-robin : un morceau par joueur a tour de role pour equilibrer
-  const players = shuffle([...byOwner.keys()]);
+  // Round-robin pour equilibrer le nombre de morceaux par joueur
+  const players = [...byOwner.keys()];
   const indices = new Map(players.map(p => [p, 0]));
-  const result = [];
+  const balanced = [];
 
   let added = true;
   while (added) {
@@ -275,12 +281,15 @@ function buildPool(room) {
       const songs = byOwner.get(pid);
       const i = indices.get(pid);
       if (i < songs.length) {
-        result.push(songs[i]);
+        balanced.push(songs[i]);
         indices.set(pid, i + 1);
         added = true;
       }
     }
   }
+
+  // Melange total : equilibre garanti, ordre imprevisible
+  return shuffle(balanced);
 
   return result;
 }
@@ -387,7 +396,7 @@ io.on('connection', (socket) => {
     const r = newRoom(code);
     rooms.set(code, r);
     const id = 'p_' + Math.random().toString(36).slice(2, 9);
-    const player = { id, name: (name || 'Joueur').slice(0, 20), socketId: socket.id, connected: true, score: 0, tracks: [], ready: false };
+    const player = { id, name: (name || 'Joueur').slice(0, 20), avatar: pickAvatar(r), socketId: socket.id, connected: true, score: 0, tracks: [], ready: false };
     r.players.set(id, player);
     r.hostId = id;
     attach(r, player);
@@ -402,13 +411,12 @@ io.on('connection', (socket) => {
     if (!r) return cb && cb({ ok: false, error: "Salon introuvable." });
     name = (name || 'Joueur').slice(0, 20);
 
-    // reconnexion : meme nom deconnecte -> on reprend le meme joueur (et son score)
     let player = [...r.players.values()].find(p => p.name.toLowerCase() === name.toLowerCase() && !p.connected);
     if (player) { player.connected = true; player.socketId = socket.id; }
     else {
       if (r.phase !== 'lobby') return cb && cb({ ok: false, error: "Partie deja commencee." });
       const id = 'p_' + Math.random().toString(36).slice(2, 9);
-      player = { id, name, socketId: socket.id, connected: true, score: 0, tracks: [], ready: false };
+      player = { id, name, avatar: pickAvatar(r), socketId: socket.id, connected: true, score: 0, tracks: [], ready: false };
       r.players.set(id, player);
     }
     attach(r, player);
@@ -442,7 +450,9 @@ io.on('connection', (socket) => {
       const existing = new Set(p.tracks.map(songKey));
       let added = 0;
       for (const t of result.tracks) { if (!existing.has(songKey(t))) { p.tracks.push(t); existing.add(songKey(t)); added++; } }
-      cb && cb({ ok: true, name: result.name, added, total: p.tracks.length, matched: result.tracks.length, requested: result.requested });
+      cb && cb({ ok: true, name: result.name, added, total: p.tracks.length, matched: result.tracks.length, requested: result.requested,
+        savedTracks: result.tracks.map(t => ({ title: t.title, artist: t.artist, preview: t.preview, cover: t.cover, deezerId: t.deezerId }))
+      });
       broadcast(r);
     } catch (e) {
       cb && cb({ ok: false, error: e.message || "Import impossible." });
@@ -453,6 +463,22 @@ io.on('connection', (socket) => {
     const p = me(), r = room();
     if (p) { p.tracks = []; broadcast(r); }
     cb && cb({ ok: true });
+  });
+
+  // Charger une playlist sauvegardee (pistes deja resolues, pas d'appel API)
+  socket.on('playlist:load', ({ name, tracks }, cb) => {
+    const r = room(), p = me();
+    if (!r || !p) return cb && cb({ ok: false, error: "Rejoins un salon d'abord." });
+    if (r.phase !== 'lobby') return cb && cb({ ok: false, error: "Trop tard, la partie a commence." });
+    if (!Array.isArray(tracks)) return cb && cb({ ok: false, error: "Donnees invalides." });
+    const existing = new Set(p.tracks.map(songKey));
+    let added = 0;
+    for (const t of tracks) {
+      if (!t.title || !t.preview) continue;
+      if (!existing.has(songKey(t))) { p.tracks.push(t); existing.add(songKey(t)); added++; }
+    }
+    cb && cb({ ok: true, name: name || 'Playlist', added, total: p.tracks.length });
+    broadcast(r);
   });
 
   socket.on('settings:update', (s) => {
@@ -496,6 +522,10 @@ io.on('connection', (socket) => {
 
     // Resultat prive : le joueur sait s'il a bon (pour afficher le blind test)
     socket.emit('round:your-result', { correct });
+    // Notification a tout le salon si bonne reponse
+    if (correct) {
+      io.to(r.code).emit('round:found', { name: p.name, avatar: p.avatar || '🎵' });
+    }
     broadcast(r);
     // Pas d'auto-reveal : le timer tourne toujours jusqu'au bout
   });
