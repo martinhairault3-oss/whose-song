@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Whose Song — devine la playlist</title>
+  <title>Spotify Roulette</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -15,8 +15,8 @@
     <!-- ACCUEIL -->
     <section id="screen-home" class="screen active">
       <div class="home-hero">
-        <h1 class="brand">Whose <em>Song</em></h1>
-        <p class="tagline">Chacun balance ses playlists. Une chanson passe — devinez de qui elle vient. Le meilleur oreille (et le meilleur goût caché) gagne.</p>
+        <h1 class="brand">Spotify <em>Roulette</em> 🎵</h1>
+        <p class="tagline">Chacun balance ses playlists. Une chanson passe — devinez de qui elle vient. La meilleure oreille (et le meilleur goût caché) gagne.</p>
       </div>
       <div class="card stack">
         <div>
@@ -60,6 +60,11 @@
         <p class="small" id="pl-status">Aucun morceau importé.</p>
       </div>
 
+      <div class="card stack" id="saved-playlists" style="display:none">
+        <h2>Playlists sauvegardées</h2>
+        <div id="saved-list"></div>
+      </div>
+
       <div class="card stack" id="host-settings" style="display:none">
         <h2>Réglages</h2>
         <div class="row" style="align-items:center">
@@ -93,6 +98,7 @@
 
     <!-- JEU -->
     <section id="screen-play" class="screen">
+      <div id="found-feed" class="found-feed"></div>
       <div class="row" style="justify-content:space-between;align-items:center">
         <span class="timer-ring" id="round-label">Manche</span>
         <span class="timer-ring">⏱ <b id="round-timer">30</b></span>
