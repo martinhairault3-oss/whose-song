@@ -1,6 +1,7 @@
 const socket = io();
 const $ = (id) => document.getElementById(id);
-const SILENT = 'data:audio/mpeg;base64,//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCA';
+// WAV valide minimal (44 bytes) pour debloquer l'audio sur mobile
+const SILENT = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
 
 let me = { playerId: null };
 let st = null;
@@ -140,7 +141,16 @@ function renderLobby() {
 
 // ---------- deblocage audio ----------
 $('btn-ready').onclick = () => {
-  audio.src = SILENT; audio.play().then(() => { audio.pause(); audio.currentTime = 0; audioUnlocked = true; }).catch(() => { audioUnlocked = true; });
+  // Deblocage audio : AudioContext (fiable sur iOS) + element audio
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const buf = ctx.createBuffer(1, 1, 22050);
+    const src = ctx.createBufferSource();
+    src.buffer = buf; src.connect(ctx.destination); src.start();
+    ctx.resume();
+  } catch {}
+  audio.src = SILENT;
+  audio.play().then(() => { audio.pause(); audio.currentTime = 0; audioUnlocked = true; }).catch(() => { audioUnlocked = true; });
   socket.emit('player:ready'); $('btn-ready').disabled = true; $('btn-ready').textContent = 'Prêt ✓';
 };
 function renderUnlock() { const ready = st.players.filter(p => p.ready).length; const total = st.players.filter(p => p.connected).length; $('ready-count').textContent = `${ready}/${total} prêts…`; }
