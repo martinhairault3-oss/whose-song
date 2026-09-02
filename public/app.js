@@ -151,22 +151,21 @@ function renderLobby() {
 
 // ---------- deblocage audio ----------
 $('btn-ready').onclick = () => {
-  // 1. Creer AudioContext et le connecter a l'element audio
-  //    Ca bypass le mode silencieux iOS (mute switch)
+  // 1. AudioContext : juste pour le deblocage, PAS connecte a l'element audio
   try {
-    if (!audioCtx) {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const source = audioCtx.createMediaElementSource(audio);
-      source.connect(audioCtx.destination);
-    }
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     audioCtx.resume();
+    // Jouer un son vide via AudioContext (debloque iOS)
+    const buf = audioCtx.createBuffer(1, 1, 22050);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf; src.connect(audioCtx.destination); src.start();
   } catch (e) { console.warn('AudioContext:', e); }
 
-  // 2. Debloquer l'element audio avec un WAV valide
+  // 2. Debloquer l'element audio separement (WAV valide)
   audio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
   audio.play()
     .then(() => { audio.pause(); audioUnlocked = true; toast('Son activé ✓'); })
-    .catch(() => { audioUnlocked = true; });
+    .catch((e) => { audioUnlocked = true; toast('Audio: ' + e.message); });
 
   socket.emit('player:ready'); $('btn-ready').disabled = true; $('btn-ready').textContent = 'Prêt ✓';
 };
@@ -231,8 +230,6 @@ function setupRound(r) {
 
 function playAudio(r, clipMs) {
   if (!audioUnlocked) return;
-  // Toujours resumer l'AudioContext (peut etre suspendu apres un changement d'onglet)
-  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
 
   audio.src = r.preview;
   const doPlay = () => {
@@ -241,7 +238,6 @@ function playAudio(r, clipMs) {
     audio.play().catch(() => {
       // Retry apres 500ms
       scheduleTimers.push(setTimeout(() => {
-        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
         audio.play().catch(() => toast('Impossible de lire l\'extrait.'));
       }, 500));
     });
