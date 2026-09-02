@@ -1,165 +1,349 @@
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Spotify Roulette</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css" />
-</head>
-<body>
-  <div id="app">
+const socket = io();
+const $ = (id) => document.getElementById(id);
+// Audio : element HTML (pas cree en JS) + AudioContext pour iOS
+const audio = document.getElementById('player');
+audio.volume = 1;
+let audioCtx = null;
+let audioUnlocked = false;
 
-    <!-- ACCUEIL -->
-    <section id="screen-home" class="screen active">
-      <div class="home-hero">
-        <h1 class="brand">Spotify <em>Roulette</em> 🎵</h1>
-        <p class="tagline">Chacun balance ses playlists. Une chanson passe — devinez de qui elle vient. La meilleure oreille (et le meilleur goût caché) gagne.</p>
-      </div>
-      <div class="card stack">
-        <div>
-          <label class="field" for="home-name">Ton pseudo</label>
-          <input id="home-name" type="text" maxlength="20" placeholder="Alex" autocomplete="off" />
-        </div>
-        <button id="btn-create" class="btn-primary">Créer un salon</button>
-        <div class="divider">ou rejoindre</div>
-        <div class="row">
-          <input id="home-code" class="grow" type="text" maxlength="4" placeholder="Code (ex : K7QF)" autocomplete="off" style="text-transform:uppercase" />
-          <button id="btn-join" class="btn-ghost" style="flex:0 0 auto">Rejoindre</button>
-        </div>
-      </div>
-    </section>
+let me = { playerId: null };
+let st = null;
 
-    <!-- LOBBY -->
-    <section id="screen-lobby" class="screen">
-      <div class="row" style="align-items:center">
-        <div class="code-pill grow" id="lobby-code" title="Partage ce code">— <button id="btn-copy" class="btn-ghost" style="font-size:12px;padding:6px 10px;flex:0">copier</button></div>
-      </div>
+// Afficher les erreurs audio pour diagnostiquer
+audio.addEventListener('error', () => {
+  const err = audio.error;
+  const msgs = { 1: 'Interrompu', 2: 'Réseau', 3: 'Décodage', 4: 'Format' };
+  toast('Erreur audio: ' + (msgs[err?.code] || 'inconnue'));
+});
+let currentRound = -1;
+let picked = null;
+let voteSent = false;
+let myResult = null;
+let artistSent = false;
+let artistResult = null;
+let titleSent = false;
+let scheduleTimers = [];
+let spotifyAvailable = false;
 
-      <div class="card stack">
-        <h2>Joueurs</h2>
-        <div class="players" id="lobby-players"></div>
-      </div>
+// ---------- auto-reconnexion ----------
+let rejoinPending = false;
+function tryAutoRejoin() {
+  const savedRoom = sessionStorage.getItem('ws_room');
+  const savedPlayerId = sessionStorage.getItem('ws_playerId');
+  if (!savedRoom || !savedPlayerId || !socket.connected || rejoinPending) return;
+  rejoinPending = true;
+  socket.emit('room:rejoin', { code: savedRoom, playerId: savedPlayerId }, (res) => {
+    rejoinPending = false;
+    if (res && res.ok) { me.playerId = res.playerId; }
+    else { sessionStorage.removeItem('ws_room'); sessionStorage.removeItem('ws_playerId'); }
+  });
+}
+socket.on('connect', tryAutoRejoin);
+socket.on('disconnect', () => { rejoinPending = false; toast('Connexion perdue, reconnexion…'); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    if (socket.disconnected) socket.connect();
+    tryAutoRejoin(); setTimeout(tryAutoRejoin, 500); setTimeout(tryAutoRejoin, 2000);
+    try {
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      if (audio && audio.paused && st && st.phase === 'playing' && st.round && st.round.type === 'roulette') audio.play().catch(() => {});
+    } catch {}
+  }
+});
 
-      <div class="card stack">
-        <h2>Tes playlists</h2>
-        <p class="small">Colle un lien de playlist <b>Deezer</b> ou <b>Spotify</b>. Tu peux en ajouter plusieurs.</p>
+// ---------- utilitaires UI ----------
+function show(id) { document.querySelectorAll('.screen').forEach(s => s.classList.remove('active')); $(id).classList.add('active'); }
+function toast(msg) { const t = $('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 3200); }
+const myPlayer = () => st && st.players.find(p => p.id === me.playerId);
+const isHost = () => st && st.hostId === me.playerId;
+const playerName = (id) => { const p = st && st.players.find(x => x.id === id); return p ? p.name : '?'; };
+const playerLabel = (id) => { const p = st && st.players.find(x => x.id === id); return p ? `${p.avatar} ${p.name}` : '?'; };
+function clearTimers() { scheduleTimers.forEach(clearTimeout); scheduleTimers = []; }
+function escapeHtml(s) { return (s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
-        <!-- Spotify connect -->
-        <div id="spotify-wrap" style="display:none">
-          <button id="btn-spotify" class="btn-spotify">Se connecter à Spotify</button>
-          <p class="small" style="margin-top:6px">Nécessaire pour importer une playlist Spotify.</p>
-        </div>
+// ---------- Spotify ----------
+fetch('/auth/spotify/check').then(r => r.json()).then(d => { spotifyAvailable = d.available; }).catch(() => {});
+window.addEventListener('message', (e) => { if (e.data && e.data.type === 'spotify-connected') toast('Connecté à Spotify ✓'); });
 
-        <div class="row">
-          <input id="pl-url" class="grow" type="text" placeholder="https://deezer.com/playlist/… ou Spotify" autocomplete="off" />
-          <button id="btn-add-pl" class="btn-ghost" style="flex:0 0 auto">Ajouter</button>
-        </div>
-        <p class="small" id="pl-status">Aucun morceau importé.</p>
-      </div>
+// ---------- accueil ----------
+$('btn-create').onclick = () => {
+  const name = $('home-name').value.trim(); if (!name) return toast('Choisis un pseudo.');
+  socket.emit('room:create', { name }, (res) => { if (res && res.ok) { me.playerId = res.playerId; sessionStorage.setItem('ws_room', res.code); sessionStorage.setItem('ws_playerId', res.playerId); } });
+};
+$('btn-join').onclick = () => {
+  const name = $('home-name').value.trim(); const code = $('home-code').value.trim().toUpperCase();
+  if (!name) return toast('Choisis un pseudo.'); if (code.length !== 4) return toast('Le code fait 4 lettres.');
+  socket.emit('room:join', { code, name }, (res) => { if (res && res.ok) { me.playerId = res.playerId; sessionStorage.setItem('ws_room', res.code); sessionStorage.setItem('ws_playerId', res.playerId); } else toast(res && res.error || 'Impossible de rejoindre.'); });
+};
 
-      <div class="card stack" id="saved-playlists" style="display:none">
-        <h2>Playlists sauvegardées</h2>
-        <div id="saved-list"></div>
-      </div>
+// ---------- lobby ----------
+$('btn-copy').onclick = (e) => { e.stopPropagation(); if (st) navigator.clipboard?.writeText(st.code).then(() => toast('Code copié : ' + st.code)); };
 
-      <div class="card stack" id="host-settings" style="display:none">
-        <h2>Réglages</h2>
-        <div class="row" style="align-items:center">
-          <label class="field grow" for="set-mode" style="margin:0">Mode de jeu</label>
-          <select id="set-mode" style="flex:0 0 160px">
-            <option value="roulette">🎵 Roulette</option>
-            <option value="quizplus">📊 Qui a le +/- ?</option>
-            <option value="mixed">🎲 Mixte</option>
-          </select>
-        </div>
-        <div class="row" style="align-items:center">
-          <label class="field grow" for="set-rounds" style="margin:0">Nombre de manches</label>
-          <input id="set-rounds" type="number" min="1" max="50" value="10" style="flex:0 0 90px" />
-        </div>
-        <div class="toggle">
-          <input id="set-blind" type="checkbox" checked />
-          <label for="set-blind">Blind test : bonus si tu trouves artiste + titre</label>
-        </div>
-      </div>
+// saved playlists
+function getSavedPlaylists() { try { return JSON.parse(localStorage.getItem('saved_playlists') || '[]'); } catch { return []; } }
+function savePlaylists(list) { try { localStorage.setItem('saved_playlists', JSON.stringify(list)); } catch {} }
+function savePlaylistData(name, url, tracks) {
+  const list = getSavedPlaylists(); const existing = list.findIndex(p => p.url === url);
+  const entry = { name, url, tracks: tracks.map(t => ({ title: t.title, artist: t.artist, preview: t.preview, cover: t.cover, deezerId: t.deezerId })), savedAt: Date.now() };
+  if (existing >= 0) list[existing] = entry; else list.push(entry); savePlaylists(list);
+}
+function removeSavedPlaylist(url) { savePlaylists(getSavedPlaylists().filter(p => p.url !== url)); }
+function loadSavedPlaylist(entry) { socket.emit('playlist:load', { name: entry.name, tracks: entry.tracks }, (res) => { if (res && res.ok) { $('pl-status').textContent = `« ${res.name} » : +${res.added} morceaux (total ${res.total}).`; renderSavedPlaylists(); } else toast(res && res.error || 'Erreur.'); }); }
+function renderSavedPlaylists() {
+  const box = $('saved-playlists'); if (!box) return; const list = getSavedPlaylists();
+  if (list.length === 0) { box.style.display = 'none'; return; }
+  box.style.display = 'flex'; const container = $('saved-list'); container.innerHTML = '';
+  for (const entry of list) {
+    const row = document.createElement('div'); row.className = 'saved-row';
+    row.innerHTML = `<span class="saved-name">🎵 ${escapeHtml(entry.name)} <span class="small">(${entry.tracks.length})</span></span>`;
+    const btns = document.createElement('span'); btns.className = 'saved-btns';
+    const load = document.createElement('button'); load.className = 'btn-ghost saved-btn'; load.textContent = 'Charger'; load.onclick = () => loadSavedPlaylist(entry);
+    const del = document.createElement('button'); del.className = 'kick-btn'; del.textContent = '✕'; del.onclick = () => { removeSavedPlaylist(entry.url); renderSavedPlaylists(); };
+    btns.appendChild(load); btns.appendChild(del); row.appendChild(btns); container.appendChild(row);
+  }
+}
 
-      <div class="grow"></div>
-      <button id="btn-start" class="btn-primary" style="display:none">Lancer la partie</button>
-      <button id="btn-close-lobby" class="btn-ghost btn-danger" style="display:none">Fermer le salon</button>
-      <p class="hint" id="lobby-hint"></p>
-    </section>
+let lastImportUrl = '';
+$('btn-add-pl').onclick = () => {
+  const url = $('pl-url').value.trim(); if (!url) return; lastImportUrl = url;
+  $('btn-add-pl').disabled = true; $('pl-status').textContent = 'Import en cours…';
+  socket.emit('playlist:add', { url }, (res) => {
+    $('btn-add-pl').disabled = false;
+    if (res && res.ok) { $('pl-url').value = ''; let msg = `« ${res.name} » : +${res.added} morceaux (total ${res.total}).`; if (res.requested && res.matched < res.requested) msg += ` ${res.matched}/${res.requested} trouvés sur Deezer.`; $('pl-status').textContent = msg; if (res.added > 0 && lastImportUrl && res.savedTracks) { savePlaylistData(res.name, lastImportUrl, res.savedTracks); renderSavedPlaylists(); } }
+    else { $('pl-status').textContent = res && res.error || 'Import impossible.'; toast(res && res.error || 'Import impossible.'); }
+  });
+};
+$('set-rounds').onchange = () => socket.emit('settings:update', { rounds: parseInt($('set-rounds').value, 10) });
+$('set-blind').onchange = () => socket.emit('settings:update', { blindTest: $('set-blind').checked });
+$('set-mode').onchange = () => socket.emit('settings:update', { mode: $('set-mode').value });
+$('btn-start').onclick = () => socket.emit('game:start');
 
-    <!-- DEBLOCAGE AUDIO (le seul tap obligatoire) -->
-    <section id="screen-unlock" class="screen">
-      <div class="grow"></div>
-      <div class="stage">
-        <div class="disc"></div>
-      </div>
-      <h2 style="text-align:center">Prêt à jouer&nbsp;?</h2>
-      <p class="hint">Un seul appui pour activer le son sur ton téléphone. Ensuite tout s'enchaîne tout seul.</p>
-      <button id="btn-ready" class="btn-primary">Je suis prêt</button>
-      <p class="hint" id="ready-count"></p>
-      <div class="grow"></div>
-    </section>
+$('btn-spotify').onclick = () => {
+  if (!st || !me.playerId) return; const mine = myPlayer(); if (!mine) return;
+  const url = `/auth/spotify?roomCode=${encodeURIComponent(st.code)}&playerId=${encodeURIComponent(me.playerId)}`;
+  window.open(url, 'spotify-auth', `width=500,height=700,left=${(screen.width-500)/2},top=${(screen.height-700)/2}`);
+};
 
-    <!-- JEU -->
-    <section id="screen-play" class="screen">
-      <div id="found-feed" class="found-feed"></div>
-      <div class="row" style="justify-content:space-between;align-items:center">
-        <span class="timer-ring" id="round-label">Manche</span>
-        <span class="timer-ring">⏱ <b id="round-timer">15</b></span>
-      </div>
-      <div class="stage" id="play-stage">
-        <div class="disc spinning" id="play-disc"></div>
-        <div class="countdown" id="play-countdown" style="display:none">3</div>
-      </div>
-      <div id="quiz-question" class="quiz-question" style="display:none">
-        <p id="quiz-text" class="quiz-text"></p>
-      </div>
-      <h2 style="text-align:center" id="play-heading">De qui vient ce morceau&nbsp;?</h2>
-      <div class="guess-grid" id="guess-grid"></div>
-      <div id="blind-wrap" style="display:none">
-        <label class="field" for="blind-input" id="blind-label">Bonus</label>
-        <input id="blind-input" type="text" placeholder="Titre de la chanson…" autocomplete="off" />
-        <button id="btn-title" class="btn-primary" style="margin-top:8px;font-size:16px">Valider le titre</button>
-      </div>
-      <button id="btn-vote" class="btn-primary" disabled>Valider ma réponse</button>
-      <p class="hint" id="vote-hint"></p>
-    </section>
+function renderLobby() {
+  $('lobby-code').firstChild.textContent = st.code + ' ';
+  const box = $('lobby-players'); box.innerHTML = '';
+  for (const p of st.players) {
+    const el = document.createElement('span'); el.className = 'chip' + (p.connected ? '' : ' off');
+    let extra = ''; if (p.isHost) extra += ' <span class="host">hôte</span>'; if (p.spotifyConnected) extra += ' <span class="spotify-badge">spotify</span>';
+    el.innerHTML = `<span class="dot"></span>${p.avatar || '🎵'} ${escapeHtml(p.name)}` + extra + ` <span class="count">${p.trackCount}🎵</span>`;
+    if (isHost() && p.id !== me.playerId) { const kick = document.createElement('button'); kick.className = 'kick-btn'; kick.textContent = '✕'; kick.onclick = (e) => { e.stopPropagation(); socket.emit('player:kick', { playerId: p.id }); }; el.appendChild(kick); }
+    box.appendChild(el);
+  }
+  const mine = myPlayer();
+  if (mine && mine.trackCount) $('pl-status').textContent = `${mine.trackCount} morceaux importés.`;
+  $('host-settings').style.display = isHost() ? 'flex' : 'none';
+  $('set-rounds').value = st.settings.rounds;
+  $('set-blind').checked = st.settings.blindTest;
+  $('set-mode').value = st.settings.mode || 'roulette';
+  const enough = st.players.filter(p => p.connected).length >= 2;
+  $('btn-start').style.display = isHost() ? 'block' : 'none'; $('btn-start').disabled = !enough;
+  $('btn-close-lobby').style.display = isHost() ? 'block' : 'none';
+  $('lobby-hint').textContent = isHost() ? (enough ? '' : 'Il faut au moins 2 joueurs.') : "En attente que l'hôte lance la partie.";
+  const spotifyWrap = $('spotify-wrap');
+  if (spotifyAvailable && mine) { spotifyWrap.style.display = 'block'; if (mine.spotifyConnected) { $('btn-spotify').textContent = 'Spotify connecté ✓'; $('btn-spotify').disabled = true; $('btn-spotify').classList.add('connected'); } else { $('btn-spotify').textContent = 'Se connecter à Spotify'; $('btn-spotify').disabled = false; $('btn-spotify').classList.remove('connected'); } } else { spotifyWrap.style.display = 'none'; }
+  renderSavedPlaylists();
+}
 
-    <!-- REVEAL -->
-    <section id="screen-reveal" class="screen">
-      <div class="stage">
-        <div class="disc revealed" id="reveal-disc"><img class="cover" id="reveal-cover" alt="" /></div>
-      </div>
-      <div class="owner-tag">
-        <div class="who" id="reveal-owner">—</div>
-        <div class="song" id="reveal-song">—</div>
-      </div>
-      <div class="stack" id="reveal-results"></div>
-      <div class="grow"></div>
-      <button id="btn-next" class="btn-primary" style="display:none">Manche suivante</button>
-      <button id="btn-stop" class="btn-ghost btn-danger" style="display:none">Arrêter la partie</button>
-      <p class="hint" id="reveal-hint"></p>
-    </section>
+// ---------- deblocage audio ----------
+$('btn-ready').onclick = () => {
+  // 1. AudioContext : juste pour le deblocage, PAS connecte a l'element audio
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    audioCtx.resume();
+    // Jouer un son vide via AudioContext (debloque iOS)
+    const buf = audioCtx.createBuffer(1, 1, 22050);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf; src.connect(audioCtx.destination); src.start();
+  } catch (e) { console.warn('AudioContext:', e); }
 
-    <!-- CLASSEMENT -->
-    <section id="screen-finished" class="screen">
-      <h1 class="brand">Terminé <em>🏆</em></h1>
-      <div class="rank" id="final-rank"></div>
-      <div class="grow"></div>
-      <button id="btn-restart" class="btn-primary" style="display:none">Rejouer</button>
-      <p class="hint" id="finished-hint">L'hôte peut relancer une partie.</p>
-    </section>
+  // 2. Debloquer l'element audio separement (WAV valide)
+  audio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+  audio.play()
+    .then(() => { audio.pause(); audioUnlocked = true; toast('Son activé ✓'); })
+    .catch((e) => { audioUnlocked = true; toast('Audio: ' + e.message); });
 
-  </div>
+  socket.emit('player:ready'); $('btn-ready').disabled = true; $('btn-ready').textContent = 'Prêt ✓';
+};
+function renderUnlock() { const ready = st.players.filter(p => p.ready).length; const total = st.players.filter(p => p.connected).length; $('ready-count').textContent = `${ready}/${total} prêts…`; }
 
-  <div class="toast" id="toast"></div>
-  <audio id="player" preload="auto"></audio>
+// ---------- jeu ----------
+function renderPlay() {
+  const r = st.round;
+  $('round-label').textContent = `Manche ${r.index + 1}/${r.total}`;
+  if (r.index !== currentRound) { currentRound = r.index; picked = null; voteSent = false; myResult = null; artistSent = false; artistResult = null; titleSent = false; setupRound(r); }
 
-  <script src="/socket.io/socket.io.js"></script>
-  <script src="app.js"></script>
-</body>
-</html>
+  const isQuiz = r.type === 'quizplus';
+  $('play-stage').style.display = isQuiz ? 'none' : '';
+  $('quiz-question').style.display = isQuiz ? 'block' : 'none';
+  if (isQuiz) $('quiz-text').textContent = `Qui a le ${r.direction === 'plus' ? 'plus' : 'moins'} de chansons de ${r.artist} ?`;
+  $('play-heading').textContent = isQuiz ? 'À toi de deviner !' : 'De qui vient ce morceau ?';
+
+  const grid = $('guess-grid'); grid.innerHTML = '';
+  if (!voteSent) { for (const p of st.players) { const b = document.createElement('button'); b.className = 'guess-btn' + (picked === p.id ? ' picked' : ''); b.textContent = `${p.avatar || '🎵'} ${p.name}`; b.onclick = () => { picked = p.id; renderPlay(); }; grid.appendChild(b); } }
+
+  const ownerCorrect = !isQuiz && voteSent && myResult && myResult.correct && st.settings.blindTest;
+  const showArtist = ownerCorrect && !artistSent;
+  const showTitle = ownerCorrect && artistSent && artistResult && artistResult.correct && !titleSent;
+  if (showArtist) { $('blind-wrap').style.display = 'block'; $('blind-label').textContent = "Bien joué ! Bonus : trouve l'artiste"; $('blind-input').placeholder = "Nom de l'artiste…"; $('blind-input').disabled = false; $('btn-title').textContent = "Valider l'artiste"; }
+  else if (showTitle) { $('blind-wrap').style.display = 'block'; $('blind-label').textContent = 'Bravo ! Maintenant le titre'; $('blind-input').placeholder = 'Titre de la chanson…'; $('blind-input').disabled = false; $('btn-title').textContent = 'Valider le titre'; }
+  else { $('blind-wrap').style.display = 'none'; }
+
+  const alreadyVoted = r.voted.includes(me.playerId);
+  $('btn-vote').disabled = voteSent || alreadyVoted || !picked;
+  $('btn-vote').style.display = voteSent ? 'none' : 'block';
+  if (!voteSent && !alreadyVoted) $('vote-hint').textContent = picked ? '' : 'Choisis un joueur.';
+  else if (showArtist) $('vote-hint').textContent = "Devine l'artiste pour le bonus (+25).";
+  else if (showTitle) $('vote-hint').textContent = 'Devine le titre pour encore plus (+50).';
+  else if (artistSent && artistResult && !artistResult.correct) $('vote-hint').textContent = "Raté pour l'artiste. On attend la fin…";
+  else $('vote-hint').textContent = voteSent ? 'Réponse envoyée. On attend la fin…' : '';
+}
+
+function setupRound(r) {
+  clearTimers(); show('screen-play');
+  const disc = $('play-disc'), cd = $('play-countdown');
+  if (r.type === 'roulette') {
+    disc.classList.add('spinning');
+    // Charger l'extrait — PAS de reset, juste changer le src
+    try { audio.pause(); } catch {}
+    audio.src = r.preview;
+  } else {
+    disc.classList.remove('spinning');
+    try { audio.pause(); } catch {}
+  }
+  const delay = Math.max(0, r.startAt - Date.now());
+  const clipMs = r.deadline - r.startAt;
+  if (delay > 0) {
+    cd.style.display = 'block'; cd.textContent = Math.ceil(delay / 1000);
+    const tick = () => { const left = Math.ceil((r.startAt - Date.now()) / 1000); if (left <= 0) { cd.style.display = 'none'; return; } cd.textContent = left; scheduleTimers.push(setTimeout(tick, 250)); }; tick();
+    scheduleTimers.push(setTimeout(() => { cd.style.display = 'none'; if (r.type === 'roulette') playAudio(r, clipMs); }, delay));
+  } else {
+    cd.style.display = 'none';
+    if (r.type === 'roulette') playAudio(r, clipMs);
+  }
+  const chrono = () => { const left = Math.max(0, Math.ceil((r.deadline - Date.now()) / 1000)); $('round-timer').textContent = left; if (left > 0) scheduleTimers.push(setTimeout(chrono, 300)); }; chrono();
+}
+
+function playAudio(r, clipMs) {
+  if (!audioUnlocked) return;
+
+  audio.src = r.preview;
+  const doPlay = () => {
+    const elapsed = Math.max(0, (Date.now() - r.startAt) / 1000);
+    try { audio.currentTime = elapsed; } catch {}
+    audio.play().catch(() => {
+      // Retry apres 500ms
+      scheduleTimers.push(setTimeout(() => {
+        audio.play().catch(() => toast('Impossible de lire l\'extrait.'));
+      }, 500));
+    });
+  };
+  // Si l'audio est pret, jouer. Sinon attendre canplay.
+  if (audio.readyState >= 2) {
+    doPlay();
+  } else {
+    const onReady = () => { audio.removeEventListener('canplay', onReady); doPlay(); };
+    audio.addEventListener('canplay', onReady);
+    // Fallback : essayer quand meme apres 2s
+    scheduleTimers.push(setTimeout(() => { audio.removeEventListener('canplay', onReady); doPlay(); }, 2000));
+  }
+  // Arreter a la fin du clip
+  scheduleTimers.push(setTimeout(() => { try { audio.pause(); } catch {} }, Math.max(0, r.deadline - Date.now())));
+}
+
+$('btn-vote').onclick = () => { if (!picked || voteSent) return; voteSent = true; socket.emit('round:guess', { ownerId: picked }); renderPlay(); };
+$('btn-title').onclick = () => { const val = $('blind-input').value.trim(); if (!val) return; if (!artistSent) { artistSent = true; socket.emit('round:guess-artist', { artist: val }); } else if (!titleSent) { titleSent = true; socket.emit('round:guess-title', { title: val }); } $('blind-input').value = ''; renderPlay(); };
+
+socket.on('round:your-result', (data) => { myResult = data; if (st && st.phase === 'playing') renderPlay(); });
+socket.on('round:artist-result', (data) => { artistResult = data; if (st && st.phase === 'playing') renderPlay(); });
+socket.on('round:found', ({ name, avatar }) => { const feed = $('found-feed'); if (!feed) return; const msg = document.createElement('div'); msg.className = 'found-msg'; msg.textContent = `${avatar} ${name} a trouvé !`; feed.appendChild(msg); setTimeout(() => msg.remove(), 2500); });
+
+// ---------- reveal ----------
+function renderReveal() {
+  clearTimers(); try { audio.pause(); } catch {}
+  const r = st.round, box = $('reveal-results'); box.innerHTML = '';
+
+  if (r.type === 'roulette') {
+    $('reveal-cover').src = r.cover || ''; $('reveal-cover').style.display = '';
+    $('reveal-disc').style.display = '';
+    $('reveal-owner').textContent = "C'était " + (st.players.find(p => p.id === r.ownerId)?.avatar || '') + ' ' + r.ownerName;
+    $('reveal-song').textContent = `${r.artist} — ${r.title}`;
+    for (const v of r.votes) {
+      const line = document.createElement('div'); line.className = 'result-line'; let detail = '';
+      if (v.correctOwner) {
+        detail = `<span class="verdict ok">trouvé en ${v.elapsedSec}s → +${v.speedPts}</span>`;
+        if (v.artistGuess) { detail += v.artistCorrect ? ` <span class="verdict ok">🎤 « ${escapeHtml(v.artistGuess)} » ✓ +25</span>` : ` <span class="title-guess">🎤 « ${escapeHtml(v.artistGuess)} » ✗</span>`; }
+        if (v.titleGuess) { detail += v.correctTitle ? ` <span class="verdict ok">🎵 « ${escapeHtml(v.titleGuess)} » ✓ +50</span>` : ` <span class="title-guess">🎵 « ${escapeHtml(v.titleGuess)} » ✗</span>`; }
+      } else { detail = `<span class="verdict no">a dit ${escapeHtml(playerLabel(v.guessOwner))}</span>`; }
+      const d = r.deltas[v.voter] || 0;
+      line.innerHTML = `<span>${escapeHtml(playerLabel(v.voter))}</span><span>${detail} <span class="delta">${d > 0 ? '+' + d : ''}</span></span>`;
+      box.appendChild(line);
+    }
+    const od = r.deltas[r.ownerId]; if (od) { const line = document.createElement('div'); line.className = 'result-line'; line.innerHTML = `<span>${escapeHtml(playerLabel(r.ownerId))} <span class="small">(a piégé)</span></span><span class="delta">+${od}</span>`; box.appendChild(line); }
+
+  } else {
+    // Quiz plus/moins
+    $('reveal-disc').style.display = 'none';
+    $('reveal-owner').textContent = `Qui a le ${r.direction === 'plus' ? 'plus' : 'moins'} de ${r.artist} ?`;
+    const answerPlayer = st.players.find(p => p.id === r.answerId);
+    $('reveal-song').textContent = `→ ${answerPlayer ? answerPlayer.avatar + ' ' + answerPlayer.name : '?'} (${r.answerCount} chansons)`;
+    // Counts par joueur
+    for (const p of st.players) {
+      const count = r.counts[p.id] || 0;
+      const line = document.createElement('div'); line.className = 'result-line';
+      const isAnswer = r.answerId === p.id;
+      line.innerHTML = `<span>${p.avatar} ${escapeHtml(p.name)}</span><span>${count} chansons ${isAnswer ? '<span class="verdict ok">✓</span>' : ''}</span>`;
+      box.appendChild(line);
+    }
+    // Votes
+    const vTitle = document.createElement('h2'); vTitle.textContent = 'Votes'; vTitle.style.marginTop = '10px'; box.appendChild(vTitle);
+    for (const v of r.votes) {
+      const line = document.createElement('div'); line.className = 'result-line';
+      const detail = v.correctOwner ? `<span class="verdict ok">trouvé en ${v.elapsedSec}s → +${v.speedPts}</span>` : `<span class="verdict no">a dit ${escapeHtml(playerLabel(v.guessOwner))}</span>`;
+      const d = r.deltas[v.voter] || 0;
+      line.innerHTML = `<span>${escapeHtml(playerLabel(v.voter))}</span><span>${detail} <span class="delta">${d > 0 ? '+' + d : ''}</span></span>`;
+      box.appendChild(line);
+    }
+  }
+
+  // Mini classement
+  const sTitle = document.createElement('h2'); sTitle.textContent = 'Scores'; sTitle.style.marginTop = '14px'; box.appendChild(sTitle);
+  [...st.players].sort((a, b) => b.score - a.score).forEach((p, i) => {
+    const row = document.createElement('div'); row.className = 'result-line' + (i === 0 ? ' first-rank' : '');
+    row.innerHTML = `<span>${i + 1}. ${escapeHtml(p.name)}</span><span class="pts">${p.score} pts</span>`; box.appendChild(row);
+  });
+
+  $('btn-next').style.display = isHost() ? 'block' : 'none';
+  $('btn-stop').style.display = isHost() ? 'block' : 'none';
+  $('reveal-hint').textContent = isHost() ? '' : "En attente de l'hôte…";
+}
+$('btn-next').onclick = () => socket.emit('round:next');
+$('btn-stop').onclick = () => { if (confirm('Arrêter la partie ?')) socket.emit('game:stop'); };
+$('btn-close-lobby').onclick = () => { if (confirm('Fermer le salon ?')) socket.emit('game:stop'); };
+
+// ---------- classement ----------
+function renderFinished() {
+  clearTimers(); const box = $('final-rank'); box.innerHTML = '';
+  st.ranking.forEach((p, i) => { const el = document.createElement('div'); el.className = 'row-item' + (i === 0 ? ' first' : ''); el.innerHTML = `<span class="pos">${i + 1}</span><span>${escapeHtml(p.name)}</span><span class="pts">${p.score}</span>`; box.appendChild(el); });
+  $('btn-restart').style.display = isHost() ? 'block' : 'none';
+}
+$('btn-restart').onclick = () => socket.emit('game:restart');
+
+// ---------- routage d'etat ----------
+socket.on('state', (state) => {
+  st = state;
+  switch (state.phase) {
+    case 'lobby': currentRound = -1; show('screen-lobby'); renderLobby(); break;
+    case 'lobby-ready': show('screen-unlock'); renderUnlock(); break;
+    case 'playing': renderPlay(); break;
+    case 'reveal': show('screen-reveal'); renderReveal(); break;
+    case 'finished': show('screen-finished'); renderFinished(); break;
+  }
+});
+socket.on('error:msg', (m) => toast(m));
+socket.on('kicked', () => { me.playerId = null; st = null; sessionStorage.removeItem('ws_room'); sessionStorage.removeItem('ws_playerId'); show('screen-home'); toast("Tu as été retiré du salon."); });
+socket.on('room:closed', () => { me.playerId = null; st = null; sessionStorage.removeItem('ws_room'); sessionStorage.removeItem('ws_playerId'); show('screen-home'); toast('Le salon a été fermé.'); });
