@@ -13,6 +13,20 @@ const io = new Server(server);
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/health', (_, res) => res.send('ok'));
 
+// Proxy audio : sert les extraits Deezer en same-origin pour eviter les
+// problemes de lecture cross-origin sur mobile.
+app.get('/audio', async (req, res) => {
+  const url = req.query.url;
+  if (!url || (!url.includes('dzcdn.net') && !url.includes('deezer.com'))) return res.status(400).end();
+  try {
+    const r = await fetch(url, { headers: { 'User-Agent': 'whose-song/1.0' } });
+    if (!r.ok) return res.status(r.status).end();
+    res.set('Content-Type', r.headers.get('content-type') || 'audio/mpeg');
+    res.set('Cache-Control', 'public, max-age=600');
+    res.send(Buffer.from(await r.arrayBuffer()));
+  } catch { res.status(502).end(); }
+});
+
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`Spotify Roulette sur http://localhost:${PORT}`));
 
