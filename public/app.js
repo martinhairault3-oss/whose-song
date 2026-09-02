@@ -1,13 +1,20 @@
 const socket = io();
 const $ = (id) => document.getElementById(id);
-// WAV valide minimal (44 bytes) pour debloquer l'audio sur mobile
-const SILENT = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+// Audio : element HTML (pas cree en JS) + AudioContext pour iOS
+const audio = document.getElementById('player');
+audio.volume = 1;
+let audioCtx = null;
+let audioUnlocked = false;
 
 let me = { playerId: null };
 let st = null;
-let audio = new Audio();
-audio.preload = 'auto';
-let audioUnlocked = false;
+
+// Afficher les erreurs audio pour diagnostiquer
+audio.addEventListener('error', () => {
+  const err = audio.error;
+  const msgs = { 1: 'Interrompu', 2: 'Réseau', 3: 'Décodage', 4: 'Format' };
+  toast('Erreur audio: ' + (msgs[err?.code] || 'inconnue'));
+});
 let currentRound = -1;
 let picked = null;
 let voteSent = false;
@@ -37,7 +44,10 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     if (socket.disconnected) socket.connect();
     tryAutoRejoin(); setTimeout(tryAutoRejoin, 500); setTimeout(tryAutoRejoin, 2000);
-    try { if (audio && audio.paused && st && st.phase === 'playing' && st.round && st.round.type === 'roulette') audio.play().catch(() => {}); } catch {}
+    try {
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      if (audio && audio.paused && st && st.phase === 'playing' && st.round && st.round.type === 'roulette') audio.play().catch(() => {});
+    } catch {}
   }
 });
 
@@ -141,16 +151,23 @@ function renderLobby() {
 
 // ---------- deblocage audio ----------
 $('btn-ready').onclick = () => {
-  // Deblocage audio : AudioContext (fiable sur iOS) + element audio
+  // 1. Creer AudioContext et le connecter a l'element audio
+  //    Ca bypass le mode silencieux iOS (mute switch)
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const buf = ctx.createBuffer(1, 1, 22050);
-    const src = ctx.createBufferSource();
-    src.buffer = buf; src.connect(ctx.destination); src.start();
-    ctx.resume();
-  } catch {}
-  audio.src = SILENT;
-  audio.play().then(() => { audio.pause(); audio.currentTime = 0; audioUnlocked = true; }).catch(() => { audioUnlocked = true; });
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaElementSource(audio);
+      source.connect(audioCtx.destination);
+    }
+    audioCtx.resume();
+  } catch (e) { console.warn('AudioContext:', e); }
+
+  // 2. Debloquer l'element audio avec un WAV valide
+  audio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+  audio.play()
+    .then(() => { audio.pause(); audioUnlocked = true; toast('Son activé ✓'); })
+    .catch(() => { audioUnlocked = true; });
+
   socket.emit('player:ready'); $('btn-ready').disabled = true; $('btn-ready').textContent = 'Prêt ✓';
 };
 function renderUnlock() { const ready = st.players.filter(p => p.ready).length; const total = st.players.filter(p => p.connected).length; $('ready-count').textContent = `${ready}/${total} prêts…`; }
@@ -214,15 +231,22 @@ function setupRound(r) {
 
 function playAudio(r, clipMs) {
   if (!audioUnlocked) return;
+  // Toujours resumer l'AudioContext (peut etre suspendu apres un changement d'onglet)
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+
+  audio.src = r.preview;
   const doPlay = () => {
     const elapsed = Math.max(0, (Date.now() - r.startAt) / 1000);
     try { audio.currentTime = elapsed; } catch {}
     audio.play().catch(() => {
       // Retry apres 500ms
-      scheduleTimers.push(setTimeout(() => audio.play().catch(() => {}), 500));
+      scheduleTimers.push(setTimeout(() => {
+        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+        audio.play().catch(() => toast('Impossible de lire l\'extrait.'));
+      }, 500));
     });
   };
-  // Si l'audio est pret, jouer tout de suite. Sinon attendre canplay.
+  // Si l'audio est pret, jouer. Sinon attendre canplay.
   if (audio.readyState >= 2) {
     doPlay();
   } else {
