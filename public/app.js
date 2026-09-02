@@ -192,45 +192,46 @@ function setupRound(r) {
   const disc = $('play-disc'), cd = $('play-countdown');
   if (r.type === 'roulette') {
     disc.classList.add('spinning');
-    // Reset propre de l'element audio (sans en creer un nouveau — garde le deblocage)
+    // Charger l'extrait — PAS de reset, juste changer le src
     try { audio.pause(); } catch {}
-    audio.removeAttribute('src');
-    audio.load(); // force le reset interne du navigateur
     audio.src = r.preview;
-    audio.load();
-  } else { disc.classList.remove('spinning'); try { audio.pause(); audio.removeAttribute('src'); } catch {} }
-  const delay = r.startAt - Date.now(), clipSec = (r.deadline - r.startAt) / 1000;
+  } else {
+    disc.classList.remove('spinning');
+    try { audio.pause(); } catch {}
+  }
+  const delay = Math.max(0, r.startAt - Date.now());
+  const clipMs = r.deadline - r.startAt;
   if (delay > 0) {
     cd.style.display = 'block'; cd.textContent = Math.ceil(delay / 1000);
     const tick = () => { const left = Math.ceil((r.startAt - Date.now()) / 1000); if (left <= 0) { cd.style.display = 'none'; return; } cd.textContent = left; scheduleTimers.push(setTimeout(tick, 250)); }; tick();
-    if (r.type === 'roulette') scheduleTimers.push(setTimeout(() => startClip(r, clipSec), delay));
-    else scheduleTimers.push(setTimeout(() => { cd.style.display = 'none'; }, delay));
-  } else { cd.style.display = 'none'; if (r.type === 'roulette') startClip(r, clipSec); }
+    scheduleTimers.push(setTimeout(() => { cd.style.display = 'none'; if (r.type === 'roulette') playAudio(r, clipMs); }, delay));
+  } else {
+    cd.style.display = 'none';
+    if (r.type === 'roulette') playAudio(r, clipMs);
+  }
   const chrono = () => { const left = Math.max(0, Math.ceil((r.deadline - Date.now()) / 1000)); $('round-timer').textContent = left; if (left > 0) scheduleTimers.push(setTimeout(chrono, 300)); }; chrono();
 }
-function startClip(r, clipSec) {
-  if (!audioUnlocked) return;
-  const elapsed = Math.max(0, (Date.now() - r.startAt) / 1000);
-  if (elapsed >= clipSec) return;
-  try { audio.currentTime = Math.min(elapsed, clipSec - 0.5); } catch {}
 
-  const tryPlay = (attempt) => {
-    audio.play().then(() => {
-      // Watchdog : verifie que ca joue vraiment 1s apres
-      scheduleTimers.push(setTimeout(() => {
-        if (audio.paused && Date.now() < r.deadline) {
-          audio.load();
-          setTimeout(() => audio.play().catch(() => {}), 200);
-        }
-      }, 1000));
-    }).catch(() => {
-      if (attempt < 3) {
-        setTimeout(() => { audio.load(); setTimeout(() => tryPlay(attempt + 1), 200); }, 300);
-      }
+function playAudio(r, clipMs) {
+  if (!audioUnlocked) return;
+  const doPlay = () => {
+    const elapsed = Math.max(0, (Date.now() - r.startAt) / 1000);
+    try { audio.currentTime = elapsed; } catch {}
+    audio.play().catch(() => {
+      // Retry apres 500ms
+      scheduleTimers.push(setTimeout(() => audio.play().catch(() => {}), 500));
     });
   };
-  tryPlay(0);
-
+  // Si l'audio est pret, jouer tout de suite. Sinon attendre canplay.
+  if (audio.readyState >= 2) {
+    doPlay();
+  } else {
+    const onReady = () => { audio.removeEventListener('canplay', onReady); doPlay(); };
+    audio.addEventListener('canplay', onReady);
+    // Fallback : essayer quand meme apres 2s
+    scheduleTimers.push(setTimeout(() => { audio.removeEventListener('canplay', onReady); doPlay(); }, 2000));
+  }
+  // Arreter a la fin du clip
   scheduleTimers.push(setTimeout(() => { try { audio.pause(); } catch {} }, Math.max(0, r.deadline - Date.now())));
 }
 
