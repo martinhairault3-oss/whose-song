@@ -9,11 +9,23 @@ let audioUnlocked = false;
 let me = { playerId: null };
 let st = null;
 
-// Afficher les erreurs audio pour diagnostiquer
+// Quand l'extrait ne charge pas (URL expiree), demander une URL fraiche au serveur
+let lastFailedSrc = '';
 audio.addEventListener('error', () => {
-  const err = audio.error;
-  const msgs = { 1: 'Interrompu', 2: 'Réseau', 3: 'Décodage', 4: 'Format' };
-  toast('Erreur audio: ' + (msgs[err?.code] || 'inconnue'));
+  if (audio.src === lastFailedSrc) return; // deja tente pour cette URL
+  lastFailedSrc = audio.src;
+  if (st && st.phase === 'playing' && st.round && st.round.type === 'roulette') {
+    toast('Rechargement…');
+    socket.emit('round:audio-error', (res) => {
+      if (res && res.ok && res.preview) {
+        audio.src = res.preview;
+        audio.load();
+        audio.play().catch(() => toast('Extrait indisponible'));
+      } else {
+        toast('Extrait indisponible');
+      }
+    });
+  }
 });
 let currentRound = -1;
 let picked = null;
@@ -187,7 +199,7 @@ function renderUnlock() { const ready = st.players.filter(p => p.ready).length; 
 function renderPlay() {
   const r = st.round;
   $('round-label').textContent = `Manche ${r.index + 1}/${r.total}`;
-  if (r.index !== currentRound) { currentRound = r.index; picked = null; voteSent = false; myResult = null; artistSent = false; artistResult = null; titleSent = false; setupRound(r); }
+  if (r.index !== currentRound) { currentRound = r.index; picked = null; voteSent = false; myResult = null; artistSent = false; artistResult = null; titleSent = false; lastFailedSrc = ''; setupRound(r); }
 
   const isQuiz = r.type === 'quizplus';
   $('play-stage').style.display = isQuiz ? 'none' : '';
@@ -218,11 +230,11 @@ function renderPlay() {
 function setupRound(r) {
   clearTimers(); show('screen-play');
   const disc = $('play-disc'), cd = $('play-countdown');
+  $('btn-manual-play').style.display = 'none';
   if (r.type === 'roulette') {
     disc.classList.add('spinning');
     try { audio.pause(); } catch {}
-    // Proxy same-origin : evite les problemes cross-origin sur mobile
-    audio.src = '/audio?url=' + encodeURIComponent(r.preview);
+    audio.src = r.preview;
     audio.load();
   } else {
     disc.classList.remove('spinning');
@@ -241,31 +253,20 @@ function setupRound(r) {
 }
 
 function playAudio(r) {
-  if (!audioUnlocked) { toast('Audio non débloqué'); return; }
+  if (!audioUnlocked) { showPlayButton(r); return; }
+  audio.play()
+    .then(() => { $('btn-manual-play').style.display = 'none'; })
+    .catch(() => { showPlayButton(r); });
+  // Stop a la fin du round
+  scheduleTimers.push(setTimeout(() => { try { audio.pause(); } catch {} $('btn-manual-play').style.display = 'none'; }, Math.max(0, r.deadline - Date.now())));
+}
 
-  function doPlay() {
-    audio.play()
-      .then(() => {
-        // Watchdog : si l'audio s'est mis en pause tout seul apres 1s, relancer
-        scheduleTimers.push(setTimeout(() => {
-          if (audio.paused && Date.now() < r.deadline) audio.play().catch(() => {});
-        }, 1000));
-      })
-      .catch((e) => {
-        toast('Audio: ' + (e.message || 'erreur'));
-        scheduleTimers.push(setTimeout(() => audio.play().catch(() => {}), 800));
-      });
-  }
-
-  if (audio.readyState >= 2) {
-    doPlay();
-  } else {
-    const onReady = () => { audio.removeEventListener('canplay', onReady); clearTimeout(fb); doPlay(); };
-    audio.addEventListener('canplay', onReady);
-    const fb = setTimeout(() => { audio.removeEventListener('canplay', onReady); doPlay(); }, 3000);
-    scheduleTimers.push(fb);
-  }
-  scheduleTimers.push(setTimeout(() => { try { audio.pause(); } catch {} }, Math.max(0, r.deadline - Date.now())));
+function showPlayButton(r) {
+  const btn = $('btn-manual-play');
+  btn.style.display = 'inline-block';
+  btn.onclick = () => {
+    audio.play().then(() => { btn.style.display = 'none'; }).catch(() => {});
+  };
 }
 
 $('btn-vote').onclick = () => { if (!picked || voteSent) return; voteSent = true; socket.emit('round:guess', { ownerId: picked }); renderPlay(); };
