@@ -88,7 +88,19 @@ function savePlaylistData(name, url, tracks) {
   if (existing >= 0) list[existing] = entry; else list.push(entry); savePlaylists(list);
 }
 function removeSavedPlaylist(url) { savePlaylists(getSavedPlaylists().filter(p => p.url !== url)); }
-function loadSavedPlaylist(entry) { socket.emit('playlist:load', { name: entry.name, tracks: entry.tracks }, (res) => { if (res && res.ok) { $('pl-status').textContent = `« ${res.name} » : +${res.added} morceaux (total ${res.total}).`; renderSavedPlaylists(); } else toast(res && res.error || 'Erreur.'); }); }
+function loadSavedPlaylist(entry) {
+  // Re-importe depuis l'URL (les preview URLs Deezer expirent)
+  $('pl-status').textContent = 'Import en cours…';
+  socket.emit('playlist:add', { url: entry.url }, (res) => {
+    if (res && res.ok) {
+      let msg = `« ${res.name} » : +${res.added} morceaux (total ${res.total}).`;
+      $('pl-status').textContent = msg;
+      // Met a jour les donnees sauvegardees avec des URLs fraiches
+      if (res.savedTracks) savePlaylistData(res.name, entry.url, res.savedTracks);
+      renderSavedPlaylists();
+    } else { toast(res && res.error || 'Erreur de chargement.'); }
+  });
+}
 function renderSavedPlaylists() {
   const box = $('saved-playlists'); if (!box) return; const list = getSavedPlaylists();
   if (list.length === 0) { box.style.display = 'none'; return; }
