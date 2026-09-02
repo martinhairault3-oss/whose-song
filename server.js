@@ -13,20 +13,6 @@ const io = new Server(server);
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/health', (_, res) => res.send('ok'));
 
-// Proxy audio : sert les extraits Deezer en same-origin pour eviter les
-// problemes de lecture cross-origin sur mobile.
-app.get('/audio', async (req, res) => {
-  const url = req.query.url;
-  if (!url || (!url.includes('dzcdn.net') && !url.includes('deezer.com'))) return res.status(400).end();
-  try {
-    const r = await fetch(url, { headers: { 'User-Agent': 'whose-song/1.0' } });
-    if (!r.ok) return res.status(r.status).end();
-    res.set('Content-Type', r.headers.get('content-type') || 'audio/mpeg');
-    res.set('Cache-Control', 'public, max-age=600');
-    res.send(Buffer.from(await r.arrayBuffer()));
-  } catch { res.status(502).end(); }
-});
-
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`Spotify Roulette sur http://localhost:${PORT}`));
 
@@ -426,6 +412,26 @@ io.on('connection', (socket) => {
   });
 
   socket.on('round:next', () => { const r = room(); if (!r || !isHost() || r.phase !== 'reveal') return; nextRound(r); });
+
+  // Rafraichir l'URL de preview quand l'extrait ne charge pas (URL expiree)
+  socket.on('round:audio-error', async (cb) => {
+    const r = room();
+    if (!r || r.phase !== 'playing' || !r.round || r.round.type !== 'roulette') return cb && cb({ ok: false });
+    const song = r.round.song;
+    if (!song.deezerId) return cb && cb({ ok: false });
+    try {
+      const res = await fetch(`https://api.deezer.com/track/${song.deezerId}`, { headers: { 'User-Agent': 'whose-song/1.0' } });
+      const data = await res.json();
+      if (data && data.preview && !data.error) {
+        song.preview = data.preview; // met a jour pour les futurs broadcasts
+        cb && cb({ ok: true, preview: data.preview });
+      } else {
+        cb && cb({ ok: false, error: 'Extrait indisponible sur Deezer' });
+      }
+    } catch (e) {
+      cb && cb({ ok: false, error: e.message });
+    }
+  });
 
   socket.on('game:restart', () => {
     const r = room(); if (!r || !isHost()) return;
