@@ -180,7 +180,9 @@ function buildRoulettePool(room) {
   const players = [...byOwner.keys()], indices = new Map(players.map(p => [p, 0])), balanced = [];
   let added = true;
   while (added) { added = false; for (const pid of players) { const songs = byOwner.get(pid); const i = indices.get(pid); if (i < songs.length) { balanced.push(songs[i]); indices.set(pid, i + 1); added = true; } } }
-  return shuffle(balanced).map(song => ({ type: 'roulette', song }));
+  // Retourne la liste equilibree (round-robin) SANS shuffle
+  // Le shuffle se fait dans startGame APRES le slice pour garder l'equilibre
+  return balanced.map(song => ({ type: 'roulette', song }));
 }
 
 function buildQuizPlusPool(room) {
@@ -221,7 +223,8 @@ function buildGamePool(room) {
   console.log(`Mixed pool: ${r.length} roulette, ${q.length} quiz`);
   let ri = 0, qi = 0;
   while (ri < r.length || qi < q.length) { if (ri < r.length) mix.push(r[ri++]); if (qi < q.length) mix.push(q[qi++]); }
-  return shuffle(mix);
+  // Retourne le mix equilibre, le shuffle se fera dans startGame apres le slice
+  return mix;
 }
 
 // ---------------------------------------------------------------------------
@@ -230,7 +233,9 @@ function buildGamePool(room) {
 function startGame(room) {
   const pool = buildGamePool(room);
   if (pool.length === 0) { io.to(room.code).emit('error:msg', "Pas assez de morceaux ou d'artistes en commun. Ajoutez plus de playlists."); return; }
-  room.songs = pool.slice(0, Math.min(room.settings.rounds, pool.length));
+  // Slice d'abord (garde l'equilibre round-robin), puis shuffle (ordre aleatoire)
+  const selected = pool.slice(0, Math.min(room.settings.rounds, pool.length));
+  room.songs = shuffle(selected);
   for (const p of room.players.values()) { p.score = 0; p.ready = false; }
   room.roundIndex = -1;
   room.phase = 'lobby-ready';
